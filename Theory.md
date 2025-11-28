@@ -59,30 +59,18 @@ $$
 모든 스파이킹 층은 LIF(Leaky Integrate and Fire) 뉴런을 사용한다. 연속 시간 막전위 $V$ 에 대해
 
 $$
-\tau_m \frac{\mathrm d V}{\mathrm d t}
-=
--(V - V_{\text{rest}}) + R I_{\text{in}}
+\tau_{m} \frac{\mathrm{d} V}{\mathrm{d} t} = -(V - V_{\text{rest}}) + R I_{\text{in}}
 $$
 
 을 사용한다. 이산 시간 구현에서는 시뮬레이션 타임스텝 크기를 $\Delta t$ 로 두고
 
 $$
-V(t+1)
-=
-V(t)
-+
-\frac{\Delta t}{\tau_m}
-\cdot
-\bigl(
--(V(t) - V_{\text{rest}})
-+
-R I_{\text{in}}(t)
-\bigr)
+V(t+1) = V(t) + \frac{\Delta t}{\tau_{m}} \cdot \bigl( -(V(t) - V_{\text{rest}}) + R I_{\text{in}}(t) \bigr)
 $$
 
 을 사용한다. $V(t+1)$ 이 임계치 $V_{\text{th}}$ 를 넘으면 스파이크를 발생시키고 막전위를 $V_{\text{reset}}$ 으로 리셋한다.
 
-$\tau_m$ 와 $V_{\text{rest}}$ 와 $V_{\text{th}}$ 와 $V_{\text{reset}}$ 와 $R$ 와 $\Delta t$ 는 실험마다 재조정해야 하는 중요한 상수이므로 **모두 CLI 하이퍼파라미터로 노출**한다. 문서에서 제시하는 값은 기본값의 예시일 뿐이며 실제 실험에서는 커맨드라인 인자를 통해 결정된다.
+$\tau_{m}$ 와 $V_{\text{rest}}$ 와 $V_{\text{th}}$ 와 $V_{\text{reset}}$ 와 $R$ 와 $\Delta t$ 는 실험마다 재조정해야 하는 중요한 상수이므로 **모두 CLI 하이퍼파라미터로 노출**한다. 문서에서 제시하는 값은 기본값의 예시일 뿐이며 실제 실험에서는 커맨드라인 인자를 통해 결정된다.
 
 **2.3 스파이크 히스토리 배열과 1D CNN 입력 길이**
 
@@ -110,9 +98,9 @@ $$
 
 각 시냅스 $i$ 의 스파이크 히스토리 배열은
 
-- 완전 비지도 계열 실험에서 $X^{\text{unsup}}_{i}(t) \in \mathbb R^{2K_{\text{unsup}}}$
-- 완전지도 실험에서 $X^{\text{sup}}_{i}(t) \in \mathbb R^{2K_{\text{sup}}}$
-- 준지도 실험에서 $X^{\text{semi}}_{i}(t) \in \mathbb R^{2K_{\text{semi}}}$
+- 완전 비지도 계열 실험에서 $X_{i}(t)^{\text{unsup}} \in \mathbb R^{2K_{\text{unsup}}}$
+- 완전지도 실험에서 $X_{i}(t)^{\text{sup}} \in \mathbb R^{2K_{\text{sup}}}$
+- 준지도 실험에서 $X_{i}(t)^{\text{semi}} \in \mathbb R^{2K_{\text{semi}}}$
 
 형태로 정의한다. 두 채널은 pre 뉴런과 post 뉴런의 스파이크 시퀀스를 의미한다.
 
@@ -145,10 +133,10 @@ CNN 에서 얻은 feature 벡터와 스칼라 정보를 concat 하는 late fusio
 따라서 입력 벡터는
 
 - 완전 비지도 계열과 준지도에서  
-  $z^{\text{unsup}}_{i}(t) = [h_i(t) ; w_i(t)] \in \mathbb R^{33}$  
-  $z^{\text{semi}}_{i}(t) = [h_i(t) ; w_i(t)] \in \mathbb R^{33}$
+  $z_{i}(t)^{\text{unsup}} = [h_i(t) ; w_i(t)] \in \mathbb R^{33}$  
+  $z_{i}(t)^{\text{semi}} = [h_i(t) ; w_i(t)] \in \mathbb R^{33}$
 - 완전지도 실험에서  
-  $z^{\text{sup}}_{i}(t) = [h_i(t) ; w_i(t) ; l_{\text{norm} i}] \in \mathbb R^{34}$
+  $z_{i}(t)^{\text{sup}} = [h_i(t) ; w_i(t) ; l_{\text{norm} i}] \in \mathbb R^{34}$
 
 로 정의한다. 여기서 $[\cdot ; \cdot]$ 는 벡터 연결 연산을 의미한다.
 
@@ -180,15 +168,7 @@ $$
 $$
 
 $$
-w_i(t+1)
-=
-\operatorname{clip}
-\bigl(
-w_i(t) + \Delta w_i(t)
-\, ; \,
-w_{\min(\text{group}(i))} \, , \,
-w_{\max(\text{group}(i))}
-\bigr)
+w_i(t+1) = \operatorname{clip} \bigl( w_i(t) + \Delta w_i(t) \ ; \ w_{\min(\text{group}(i))} \ , \ w_{\max(\text{group}(i))} \bigr)
 $$
 
 으로 정의한다. 여기서 $\eta_{\text{group}(i)}$ 는 시냅스 타입별 학습률이다. $\eta_{\text{group}}$ 들 역시 모두 **CLI 하이퍼파라미터** 로 두며 문서의 값은 기본값 예시로만 사용한다.
@@ -202,7 +182,7 @@ $$
 - pre 스파이크 기반 업데이트는 pre 가중치 정책에 의해
 - post 스파이크 기반 업데이트는 post 가중치 정책에 의해
 
-결정된다고 가정한다. 이때도 정책의 개수는 미리 정해진 소수 개이며 많은 시냅스가 같은 pre 와 post 가중치 정책을 **강하게 공유**한다.
+결정된다고 가정한다. 이때도 정책의 개수는 미리 정해진 소수 개이며 모든 시냅스가 같은 pre 와 post 가중치 정책을 공유한다.
 
 **2.7 가치함수 네트워크(Critic)**
 
@@ -236,9 +216,7 @@ $$
 Critic 출력은
 
 $$
-V_e
-=
-V_{\phi}(s_e)
+V_e = V_{\phi}(s_e)
 $$
 
 로 표기한다.
@@ -252,11 +230,7 @@ $$
 누적 보상(return)은 이벤트 인덱스 $e$ 에 대해
 
 $$
-G_e
-=
-\sum_{k \ge e}
-\gamma^{k-e}
-r_k
+G_e = \sum_{k \ge e} \gamma^{k-e} r_k
 $$
 
 로 정의한다. 완전 비지도와 준지도 실험에서는 에피소드 종료 후 전역 보상 $R$ 을 계산한 뒤 모든 이벤트에 대해 $r_e = R$ 로 두고 discount factor 를 $\gamma_{\text{unsup}} = 1$ 과 $\gamma_{\text{semi}} = 1$ 로 두어 항상 $G_e = R$ 이 되도록 단순화한다. 완전지도 gradient mimicry 실험에서는 보상이 이미 시간과 시냅스별로 충분히 local 하므로 $\gamma_{\text{sup}} = 1$ 로 두고 $G_e = r_e$ 로 본다.
@@ -264,11 +238,7 @@ $$
 Advantage 는
 
 $$
-A_e
-=
-G_e
--
-V_e
+A_e = G_e - V_e
 $$
 
 로 정의한다.
@@ -280,11 +250,7 @@ $$
 가중치 정책은 Gaussian 정책이므로 로그 확률은
 
 $$
-\log \pi_{\theta}(a_e \mid s_e)
-=
--\frac{(a_e - m_e)^2}{2 \sigma_{\text{policy}}^2}
-+
-C
+\log \pi_{\theta}(a_e \mid s_e) = -\frac{(a_e - m_e)^2}{2 \sigma_{\text{policy}}^2} + C
 $$
 
 형태가 된다. 여기서 $m_e$ 는 해당 상태에서 정책 네트워크가 출력한 평균이고 $C$ 는 $\theta$ 와 무관한 상수이다.
@@ -292,27 +258,13 @@ $$
 에피소드 단위 Actor 손실은
 
 $$
-L_{\text{actor}}
-=
--
-\mathbb E_e
-\bigl[
-A_e
-\log \pi_{\theta}(a_e \mid s_e)
-\bigr]
+L_{\text{actor}} = -\mathbb{E} _ e \left[ A _ e \log \pi_{\theta}(a_e\mid s_e) \right]
 $$
 
 로 정의한다. Critic 손실은
 
 $$
-L_{\text{critic}}
-=
-\mathbb E_e
-\bigl[
-\bigl(
-G_e - V_{\phi}(s_e)
-\bigr)^2
-\bigr]
+L_{\text{critic}} = \mathbb{E} _ e \left[ \left( G _ e - V_{\phi}(s_e) \right)^2 \right]
 $$
 
 이다.
@@ -320,37 +272,15 @@ $$
 엔트로피 정규화를 포함한 전체 손실은
 
 $$
-L_{\text{RL}}
-=
-L_{\text{actor}}
-+
-\beta_v
-L_{\text{critic}}
--
-\beta_{\text{ent}}
-H(\pi)
+L_{\text{RL}} = L_{\text{actor}} + \beta_{v} L_{\text{critic}} - \beta_{\text{ent}} H(\pi)
 $$
 
-로 정의한다. $\beta_v$ 와 $\beta_{\text{ent}}$ 는 각각 value 손실과 정책 엔트로피의 가중치이다. 두 값 역시 실험마다 바꾸어 볼 수 있는 하이퍼파라미터이므로 CLI 인자로 노출한다.
+로 정의한다. $\beta_{v}$ 와 $\beta_{\text{ent}}$ 는 각각 value 손실과 정책 엔트로피의 가중치이다. 두 값 역시 실험마다 바꾸어 볼 수 있는 하이퍼파라미터이므로 CLI 인자로 노출한다.
 
 파라미터 업데이트는
 
 $$
-\theta
-\leftarrow
-\theta
--
-\alpha_{\text{actor}}
-\frac{\partial L_{\text{RL}}}{\partial \theta}
-$$
-
-$$
-\phi
-\leftarrow
-\phi
--
-\alpha_{\text{critic}}
-\frac{\partial L_{\text{RL}}}{\partial \phi}
+\theta \leftarrow \theta - \alpha_{\text{actor}}\frac{\partial L_{\text{RL}}}{\partial \theta} \quad \phi \leftarrow \phi - \alpha_{\text{critic}}\frac{\partial L_{\text{RL}}}{\partial \phi}
 $$
 
 로 수행한다. 학습률 $\alpha_{\text{actor}}$ 와 $\alpha_{\text{critic}}$ 도 모두 CLI 하이퍼파라미터로 지정한다. 최적화 알고리즘은 기본적으로 Adam 을 사용한다.
@@ -361,7 +291,7 @@ $$
 
 - 시뮬레이션 타임스텝 수 $T_{\text{unsup}}$ 와 $T_{\text{sup}}$ 와 $T_{\text{semi}}$
 - 스파이크 히스토리 길이 $K_{\text{unsup}}$ 와 $K_{\text{sup}}$ 와 $K_{\text{semi}}$
-- LIF 뉴런 상수 $\tau_m$ 와 $V_{\text{rest}}$ 와 $V_{\text{th}}$ 와 $V_{\text{reset}}$ 와 $R$ 와 $\Delta t$
+- LIF 뉴런 상수 $\tau_{m}$ 와 $V_{\text{rest}}$ 와 $V_{\text{th}}$ 와 $V_{\text{reset}}$ 와 $R$ 와 $\Delta t$
 - Gaussian 정책의 표준편차 $\sigma_{\text{policy}}$
 - 시냅스 타입별 학습률 $\eta_{\text{group}}$
 - Actor 와 Critic 학습률 $\alpha_{\text{actor}}$ 와 $\alpha_{\text{critic}}$
@@ -408,30 +338,28 @@ $$
    1. 입력층에서 푸아송 샘플링으로 스파이크 벡터 $s_{\text{in}}(t)$ 를 생성한다.
    2. Input to E 와 E to I 와 I to E 가중치를 이용해 각 뉴런의 입력 전류를 계산한다.
    3. E 층과 I 층의 막전위를 LIF 식으로 업데이트하고 임계치를 넘는 뉴런에서 스파이크를 발생시킨다.
-   4. 각 시냅스에 대해 pre 와 post 스파이크를 스파이크 히스토리 배열 $X^{\text{unsup}}_{i}(t)$ 에 기록한다.
+   4. 각 시냅스에 대해 pre 와 post 스파이크를 스파이크 히스토리 배열 $X_{i}^{\text{unsup}}(t)$ 에 기록한다.
 4. $T_{\text{unsup}}$ 스텝이 끝나면 흥분층 뉴런의 발화 패턴을 집계해 winner 패턴 등을 계산한다.
 
 이 전체가 하나의 에피소드이며 에피소드 종료 후 전역 비지도 보상을 계산한다.
 
 **3.4 로컬 상태와 가중치 정책 적용**
 
-각 시냅스 $i$ 에 대해 스파이크 히스토리 배열 $X^{\text{unsup}}_{i}(t)$ 를 CNN 전단에 통과시켜 feature $h_i(t)$ 를 얻고 현재 가중치 $w_i(t)$ 를 concat 하여
+각 시냅스 $i$ 에 대해 스파이크 히스토리 배열 $X_{i}^{\text{unsup}}(t)$ 를 CNN 전단에 통과시켜 feature $h_i(t)$ 를 얻고 현재 가중치 $w_i(t)$ 를 concat 하여
 
 $$
-z^{\text{unsup}}_{i}(t)
-=
-[h_i(t) ; w_i(t)]
+z_{i}^{\text{unsup}}(t) = [h_i(t) ; w_i(t)]
 $$
 
 를 만든다. Input to E 와 I to E 를 포함한 모든 학습 시냅스는 공통 가중치 정책 $\pi_{\text{single}}$ 을 사용한다.
 
 이벤트는 pre 뉴런이나 post 뉴런 중 하나라도 스파이크를 낸 경우에만 생성한다. 이벤트가 발생하면
 
-1. $z^{\text{unsup}}_{i}(t)$ 를 $\pi_{\text{single}}$ 에 입력해 평균 $m_e$ 를 계산한다.
+1. $z_{i}^{\text{unsup}}(t)$ 를 $\pi_{\text{single}}$ 에 입력해 평균 $m_e$ 를 계산한다.
 2. 가우시안 정책에서 $\Delta d_e$ 를 샘플링한다.
 3. 시냅스 타입에 따라 대응되는 학습률 $\eta_{\text{group}(i)}$ 를 곱해 실제 변화량 $\Delta w_e$ 를 계산한다.
 4. 가중치 $w_i$ 를 즉시 업데이트하고 클리핑한다.
-5. Critic 에서 $V_e = V_{\phi}(z^{\text{unsup}}_{i}(t))$ 를 계산한다.
+5. Critic 에서 $V_e = V_{\phi}(z_{i}^{\text{unsup}}(t))$ 를 계산한다.
 6. $(s_e,a_e,V_e)$ 를 에피소드 버퍼에 저장한다.
 
 pre 이벤트와 post 이벤트는 모두 같은 $\pi_{\text{single}}$ 을 사용하지만 코드 수준에서는 pre 와 post 이벤트 타입을 구분해 상태에 포함시킬 수 있다.
@@ -480,8 +408,8 @@ $$
 
 두 번째 실험에서는 실험 $1$ 과 동일한 Diehl Cook 구조와 전역 비지도 보상을 유지하되 학습 시냅스를
 
-- Input to E
-- I to E
+- `Input to E`
+- `I to E`
 
 두 그룹으로 나누고 각 그룹에 서로 다른 가중치 정책 $\pi_{\text{exc}}$ 와 $\pi_{\text{inh}}$ 를 부여한다. 이를 통해
 
@@ -492,23 +420,17 @@ $$
 
 **4.2 구조와 로컬 상태**
 
-SNN 구조와 LIF 파라미터와 스파이크 히스토리 구조와 $z^{\text{unsup}}_{i}(t)$ 정의는 실험 $1$ 과 동일하다. 차이는
+SNN 구조와 LIF 파라미터와 스파이크 히스토리 구조와 $z_{i}^{\text{unsup}}(t)$ 정의는 실험 $1$ 과 동일하다. 차이는
 
-- Input to E 시냅스는 $\pi_{\text{exc}}$ 를 사용하고
-- I to E 시냅스는 $\pi_{\text{inh}}$ 를 사용한다.
+- `Input to E` 시냅스는 $\pi_{\text{exc}}$ 를 사용하고
+- `I to E` 시냅스는 $\pi_{\text{inh}}$ 를 사용한다.
 
 는 점이다. 두 가중치 정책은 CNN 전단을 공유하고 마지막 FC head 만 다르다.
 
 안정성을 위해 두 정책의 액션 범위를 스케일링해 사용할 수 있다. 예를 들어
 
 $$
-\Delta w_e
-=
-\eta_{\text{group}(i)}
-\cdot
-\alpha_{\text{unsup}}
-\cdot
-\Delta d_e
+\Delta w_e = \eta_{\text{group}(i)} \cdot \alpha_{\text{unsup}} \cdot \Delta d_e
 $$
 
 와 같이 작은 상수 $\alpha_{\text{unsup}}$ 를 곱해 업데이트의 크기를 줄인다. $\alpha_{\text{unsup}}$ 도 CLI 하이퍼파라미터로 노출한다.
@@ -564,12 +486,10 @@ $$
 
 **5.3 로컬 상태와 가중치 정책**
 
-각 시냅스의 스파이크 히스토리 $X^{\text{sup}}_{i}(t)$ 를 CNN 에 통과시켜 feature $h_i(t)$ 를 얻고 현재 가중치와 정규화된 레이어 번호를 concat 해
+각 시냅스의 스파이크 히스토리 $X_{i}^{\text{sup}}(t)$ 를 CNN 에 통과시켜 feature $h_i(t)$ 를 얻고 현재 가중치와 정규화된 레이어 번호를 concat 해
 
 $$
-z^{\text{sup}}_{i}(t)
-=
-[h_i(t) ; w_i(t) ; l_{\text{norm} i}]
+z_{i}^{\text{sup}}(t) = [h_i(t) ; w_i(t) ; l_{\text{norm} i}]
 $$
 
 를 만든다. 모든 학습 시냅스는 단일 가중치 정책 $\pi_{\text{grad}}$ 를 공유한다.
@@ -591,11 +511,7 @@ $$
 각 이벤트 $e = (i,t)$ 에서 가중치 정책이 제안한 실제 업데이트를
 
 $$
-\Delta w_{\text{agent} i t}
-=
-\eta_{\text{group}(i)}
-\cdot
-\Delta d_i(t)
+\Delta w_{i, t}^{\text{agent}} = \eta_{\text{group}(i)} \cdot \Delta d_i(t)
 $$
 
 로 두고 전역 기울기 $g_{i,t}$ 와의 정렬을 보상으로 사용한다.
@@ -603,25 +519,13 @@ $$
 기본 보상은
 
 $$
-r^{\text{grad}}_{i t}
-=
--
-g_{i,t}
-\cdot
-\Delta w_{\text{agent} i t}
+r_{i, t}^{\text{grad}} = -g_{i,t} \cdot \Delta w_{i, t}^{\text{agent}}
 $$
 
 이다. 즉 기울기와 같은 방향으로 업데이트하면 보상이 커진다. 너무 큰 업데이트를 억제하기 위해
 
 $$
-r^{\text{total}}_{i t}
-=
-r^{\text{grad}}_{i t}
--
-\lambda
-\bigl(
-\Delta w_{\text{agent} i t}
-\bigr)^2
+r_{i, t}^{\text{total}}=r_{i, t}^{\text{grad}}-\lambda \bigl(\Delta w_{i, t}^{\text{agent}}\bigr)^2
 $$
 
 를 사용한다. $\lambda$ 는 작은 양수이며 CLI 하이퍼파라미터로 노출한다.
@@ -629,9 +533,7 @@ $$
 각 이벤트에 대해
 
 $$
-r_e
-=
-r^{\text{total}}_{i t}
+r_e=r_{i, t}^{\text{total}}
 $$
 
 로 두고 $\gamma_{\text{sup}} = 1$ 이므로
@@ -696,9 +598,7 @@ gradient mimicry 실험에서 에피소드 처리 흐름은 다음과 같다.
 4. 예측 라벨은
 
 $$
-\hat y
-=
-\arg\max_k r_k
+\hat y=\arg\max_k r_k
 $$
 
 로 정의한다. 즉 출력층 발화율이 가장 높은 뉴런의 인덱스를 예측으로 사용한다.
@@ -717,21 +617,13 @@ $$
 정답 뉴런의 발화율과 가장 많이 발화한 오답 뉴런의 발화율 차이를
 
 $$
-\text{margin}
-=
-r_y
--
-\max_{k \ne y} r_k
+\text{margin}=r_y-\max_{k \ne y} r_k
 $$
 
 로 정의하고
 
 $$
-R_{\text{margin}}
-=
-\alpha_{\text{margin}}
-\cdot
-\text{margin}
+R_{\text{margin}}=\alpha_{\text{margin}}\cdot\text{margin}
 $$
 
 을 추가한다. $\alpha_{\text{margin}}$ 은 CLI 하이퍼파라미터이다.
@@ -739,12 +631,7 @@ $$
 출력층의 전체 스파이크 수를 줄이기 위해
 
 $$
-R_{\text{sparse out}}
-=
--
-\alpha_{\text{spike}}
-\cdot
-\frac{\sum_k s_k}{T_{\text{semi}} \cdot 10}
+R_{\text{sparse out}}=-\alpha_{\text{spike}}\cdot\frac{\sum_k s_k}{T_{\text{semi}} \cdot 10}
 $$
 
 을 추가할 수 있다. $\alpha_{\text{spike}}$ 역시 CLI 하이퍼파라미터이다.
@@ -752,13 +639,7 @@ $$
 최종 전역 보상은
 
 $$
-R
-=
-R_{\text{cls}}
-+
-R_{\text{margin}}
-+
-R_{\text{sparse out}}
+R=R_{\text{cls}}+R_{\text{margin}}+R_{\text{sparse out}}
 $$
 
 로 정의한다. 에피소드에 포함된 모든 이벤트에 대해
