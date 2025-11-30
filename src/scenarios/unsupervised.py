@@ -33,30 +33,76 @@ class UnsupervisedSinglePolicy(RLScenario):
         self.alpha_stab = alpha_stab
 
     def run_episode(self, episode_data: Dict) -> torch.Tensor:
-        """Simulate a placeholder episode using pre/post spike tensors."""
+        """Simulate an episode with actual Actor-Critic interaction."""
         pre_spikes: torch.Tensor = episode_data["pre"]
         post_spikes: torch.Tensor = episode_data["post"]
         weight: float = float(episode_data.get("weight", 0.0))
         clip_min, clip_max = episode_data.get("clip", (-1.0, 1.0))
         trajectory: List[TrajectoryEntry] = []
 
+        # Theory 2.8: Loop through time steps
         for t in range(pre_spikes.shape[0]):
             self.buffer.push(float(pre_spikes[t].item()), float(post_spikes[t].item()))
-            event_type = torch.tensor([[1.0, 0.0]]) if pre_spikes[t] > 0 else torch.tensor([[0.0, 1.0]])
-            fused_state = self.build_state(self.buffer, weight, event_type)
-            trajectory.append(TrajectoryEntry(fused_state=fused_state))
-            weight += float(torch.tanh(torch.tensor(0.0)).item())
-            weight = self.clip_weight(weight, clip_min, clip_max)
+            
+            # Determine event type (simplified for this demo loop)
+            # In real SNN, this happens per spike event. Here we assume non-zero pre is pre-event, etc.
+            # To strictly follow event-driven, we should act only on spikes. 
+            # Assuming 'pre_spikes' is binary.
+            is_pre_event = pre_spikes[t] > 0
+            is_post_event = post_spikes[t] > 0
+            
+            events = []
+            if is_pre_event:
+                events.append(torch.tensor([[1.0, 0.0]]))
+            if is_post_event:
+                events.append(torch.tensor([[0.0, 1.0]]))
+            
+            # Process events
+            for event_type in events:
+                fused_state = self.build_state(self.buffer, weight, event_type)
+                
+                # Theory 2.6: Sample action Delta d
+                policy_out = self.actor.sample_action(fused_state)
+                action_delta = policy_out.action.item()
+                
+                # Theory 2.7: Critic Value
+                value_est = self.critic(fused_state)
+                
+                # Store tuple (s, a_log_prob, V)
+                trajectory.append(TrajectoryEntry(
+                    fused_state=fused_state,
+                    log_prob=policy_out.log_prob,
+                    value=value_est
+                ))
+                
+                # Apply weight update (Theory 2.6: action * scale * lr)
+                # Assuming simple additive update for this demo scope
+                weight += action_delta
+                weight = self.clip_weight(weight, clip_min, clip_max)
 
+        # Theory 3.4: Compute Global Reward R
         rates = post_spikes.float().mean()
         mean_rate = rates
-        current_winner = int((post_spikes.sum(dim=0) if post_spikes.ndim > 1 else post_spikes.sum()).argmax().item()) if post_spikes.ndim > 1 else 0
+        # Find winner (simple argmax over sum for this demo)
+        if post_spikes.ndim > 1:
+            spike_counts = post_spikes.sum(dim=0)
+            current_winner = int(spike_counts.argmax().item())
+        else:
+             # Scalar case (single neuron demo)
+            current_winner = 0 if post_spikes.sum() > 0 else -1 # Placeholder
+
         sparse_r = reward_sparse(mean_rate, self.rho_target)
         div_r = reward_diversity(self.tracker.histogram())
         stab_r = reward_stability(current_winner, self.tracker)
+        
         reward = self.alpha_sparse * sparse_r + self.alpha_div * div_r + self.alpha_stab * stab_r
-        self.tracker.record(current_winner)
+        
+        if current_winner >= 0:
+            self.tracker.record(current_winner)
+            
+        # Optimize
         self.optimize_from_trajectory(trajectory, reward)
+        
         return reward.detach()
 
 
