@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from typing import Tuple
 
 import torch
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from src.scenarios.semi_supervised import SemiSupervisedScenario
@@ -40,18 +40,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_mnist_sample() -> Tuple[torch.Tensor, int]:
-    """Download MNIST and return a single normalized image and label."""
+def build_mnist_dataloader(batch_size: int = 1) -> DataLoader:
+    """Return a DataLoader that iterates over the full MNIST training set."""
     transform = transforms.Compose([transforms.ToTensor()])
     dataset = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    image, label = dataset[0]
-    return image.view(-1), int(label)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
-def run_demo(args: argparse.Namespace) -> None:
-    """Run a lightweight demonstration of the chosen scenario on a single sample."""
+def run_training(args: argparse.Namespace) -> None:
+    """Iterate across the MNIST dataset and execute the selected scenario."""
     device = args.device
-    image, label = load_mnist_sample()
+    dataloader = build_mnist_dataloader(batch_size=1)
 
     reward = torch.tensor(0.0)
     if args.scenario == "1.1":
@@ -92,44 +91,52 @@ def run_demo(args: argparse.Namespace) -> None:
         scenario = GradientMimicryScenario(history_length=args.history_length, sigma_policy=args.sigma_sup, device=device)
 
     for epoch in range(args.num_epochs):
-        encoded = poisson_encode(image, steps)
-        if args.scenario == "1.1":
-            reward = scenario.run_episode(
-                {
-                    "pre": encoded[:, 0],
-                    "post": encoded[:, 0],
-                    "clip": (args.exc_clip_min, args.exc_clip_max),
-                }
+        for batch_idx, (image, label) in enumerate(dataloader):
+            image = image.to(device)
+            label = label.to(device)
+
+            encoded = poisson_encode(image.view(-1), steps)
+            if args.scenario == "1.1":
+                reward = scenario.run_episode(
+                    {
+                        "pre": encoded[:, 0],
+                        "post": encoded[:, 0],
+                        "clip": (args.exc_clip_min, args.exc_clip_max),
+                    }
+                )
+            elif args.scenario == "1.2":
+                reward = scenario.run_episode(
+                    {
+                        "pre_exc": encoded[:, 0],
+                        "post_exc": encoded[:, 0],
+                        "clip_exc": (args.exc_clip_min, args.exc_clip_max),
+                        "clip_inh": (args.inh_clip_min, args.inh_clip_max),
+                    }
+                )
+            elif args.scenario == "2":
+                reward = scenario.run_episode(
+                    {
+                        "spikes": encoded.view(steps, -1),
+                        "label": int(label.item()),
+                        "clip": (args.exc_clip_min, args.exc_clip_max),
+                    }
+                )
+            else:
+                reward = scenario.run_episode(
+                    {
+                        "image": image.squeeze(0),
+                        "steps": steps,
+                        "layer_pos": 0.5,
+                        "label": int(label.item()),
+                        "clip": (args.exc_clip_min, args.exc_clip_max),
+                    }
+                )
+            print(
+                f"Epoch {epoch + 1}/{args.num_epochs} batch {batch_idx + 1}/{len(dataloader)} "
+                f"reward for scenario {args.scenario}: {float(reward.item()):.4f}"
             )
-        elif args.scenario == "1.2":
-            reward = scenario.run_episode(
-                {
-                    "pre_exc": encoded[:, 0],
-                    "post_exc": encoded[:, 0],
-                    "clip_exc": (args.exc_clip_min, args.exc_clip_max),
-                    "clip_inh": (args.inh_clip_min, args.inh_clip_max),
-                }
-            )
-        elif args.scenario == "2":
-            reward = scenario.run_episode(
-                {
-                    "spikes": encoded.view(steps, -1),
-                    "label": label,
-                    "clip": (args.exc_clip_min, args.exc_clip_max),
-                }
-            )
-        else:
-            reward = scenario.run_episode(
-                {
-                    "spikes": encoded.view(steps, -1),
-                    "layer_pos": 0.5,
-                    "label": label,
-                    "clip": (args.exc_clip_min, args.exc_clip_max),
-                }
-            )
-        print(f"Epoch {epoch + 1}/{args.num_epochs} reward for scenario {args.scenario}: {float(reward.item()):.4f}")
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_demo(args)
+    run_training(args)
