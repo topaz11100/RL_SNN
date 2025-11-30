@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exc-clip-max", type=float, default=1.0, dest="exc_clip_max", help="Excitatory clip upper bound")
     parser.add_argument("--inh-clip-min", type=float, default=-1.0, dest="inh_clip_min", help="Inhibitory clip lower bound")
     parser.add_argument("--inh-clip-max", type=float, default=1.0, dest="inh_clip_max", help="Inhibitory clip upper bound")
+    parser.add_argument("--num-epochs", type=int, default=3, help="Number of training episodes to run")
     parser.add_argument("--device", type=str, default="cpu", help="torch device identifier")
     return parser.parse_args()
 
@@ -52,9 +53,9 @@ def run_demo(args: argparse.Namespace) -> None:
     device = args.device
     image, label = load_mnist_sample()
 
+    reward = torch.tensor(0.0)
     if args.scenario == "1.1":
         steps = args.T_unsup1
-        encoded = poisson_encode(image, steps)
         scenario = UnsupervisedSinglePolicy(
             history_length=args.history_length,
             sigma_policy=args.sigma_unsup1,
@@ -65,16 +66,8 @@ def run_demo(args: argparse.Namespace) -> None:
             num_exc_neurons=1,
             device=device,
         )
-        reward = scenario.run_episode(
-            {
-                "pre": encoded[:, 0],
-                "post": encoded[:, 0],
-                "clip": (args.exc_clip_min, args.exc_clip_max),
-            }
-        )
     elif args.scenario == "1.2":
         steps = args.T_unsup2
-        encoded = poisson_encode(image, steps)
         scenario = UnsupervisedDualPolicy(
             history_length=args.history_length,
             sigma_exc=args.sigma_unsup2_exc,
@@ -86,46 +79,55 @@ def run_demo(args: argparse.Namespace) -> None:
             num_exc_neurons=1,
             device=device,
         )
-        reward = scenario.run_episode(
-            {
-                "pre": encoded[:, 0],
-                "post": encoded[:, 0],
-                "inhibitory": False,
-                "clip": (args.exc_clip_min, args.exc_clip_max),
-            }
-        )
     elif args.scenario == "2":
         steps = args.T_semi
-        encoded = poisson_encode(image, steps)
         scenario = SemiSupervisedScenario(
             history_length=args.history_length,
             sigma_policy=args.sigma_semi,
             beta_margin=args.beta_margin,
             device=device,
         )
-        reward = scenario.run_episode(
-            {
-                "spikes": encoded.view(steps, -1),
-                "label": label,
-                "clip": (args.exc_clip_min, args.exc_clip_max),
-            }
-        )
     else:
         steps = args.T_sup
-        encoded = poisson_encode(image, steps)
         scenario = GradientMimicryScenario(history_length=args.history_length, sigma_policy=args.sigma_sup, device=device)
-        teacher_delta = torch.zeros(1)
-        agent_delta = torch.zeros(1)
-        reward = scenario.run_episode(
-            {
-                "spikes": encoded.view(steps, -1),
-                "layer_pos": 0.5,
-                "teacher_delta": teacher_delta,
-                "agent_delta": agent_delta,
-                "clip": (args.exc_clip_min, args.exc_clip_max),
-            }
-        )
-    print(f"Demo reward for scenario {args.scenario}: {float(reward.item()):.4f}")
+
+    for epoch in range(args.num_epochs):
+        encoded = poisson_encode(image, steps)
+        if args.scenario == "1.1":
+            reward = scenario.run_episode(
+                {
+                    "pre": encoded[:, 0],
+                    "post": encoded[:, 0],
+                    "clip": (args.exc_clip_min, args.exc_clip_max),
+                }
+            )
+        elif args.scenario == "1.2":
+            reward = scenario.run_episode(
+                {
+                    "pre_exc": encoded[:, 0],
+                    "post_exc": encoded[:, 0],
+                    "clip_exc": (args.exc_clip_min, args.exc_clip_max),
+                    "clip_inh": (args.inh_clip_min, args.inh_clip_max),
+                }
+            )
+        elif args.scenario == "2":
+            reward = scenario.run_episode(
+                {
+                    "spikes": encoded.view(steps, -1),
+                    "label": label,
+                    "clip": (args.exc_clip_min, args.exc_clip_max),
+                }
+            )
+        else:
+            reward = scenario.run_episode(
+                {
+                    "spikes": encoded.view(steps, -1),
+                    "layer_pos": 0.5,
+                    "label": label,
+                    "clip": (args.exc_clip_min, args.exc_clip_max),
+                }
+            )
+        print(f"Epoch {epoch + 1}/{args.num_epochs} reward for scenario {args.scenario}: {float(reward.item()):.4f}")
 
 
 if __name__ == "__main__":
