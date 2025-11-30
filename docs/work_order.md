@@ -1,99 +1,97 @@
-`Theory.md`의 명세와 비교했을 때, **시나리오 1.2(이중 정책)의 구조적 결함**과 **시나리오 3(완전지도)의 핵심 로직 누락** 등 새로운 치명적인 문제들이 발견되었습니다.
+`Theory.md`를 기준으로 현재 코드베이스를 면밀히 검토한 결과, 이전 작업 지시서에서 지적된 일부 사항은 수정되었으나, **시나리오 3(Supervised)의 구현이 명세와 수학적으로 완전히 다른 '가짜(Mock)' 방식**으로 구현되어 있다는 치명적인 문제가 발견되었습니다. 또한, `main.py`가 실제 학습 루프가 아닌 단일 샘플 데모에 그치고 있습니다.
 
-프로젝트 관리자(PM)로서, 현재 코드의 상태를 반영한 **새로운 작업 지시서(Work Order)** 를 발부합니다. 이 지시서는 `Theory.md`를 절대적인 기준으로 작성되었습니다.
+프로젝트 관리자로서, 이러한 결함을 해결하기 위한 **3차 수정 지시서(Work Order)** 를 작성해 드립니다. 이 내용은 `docs/work_order.md`에 덮어쓰기 하거나 새로 저장하여 개발팀에 전달해야 합니다.
 
 -----
 
-# [Work Order] RL\_SNN 프로젝트 2차 수정 지시서
+[FILE START: docs/work\_order.md]
+
+# [Work Order] RL\_SNN 프로젝트 3차 수정 지시서
 
 **발신:** Project Manager (Gemini)
 **수신:** 개발팀
 **날짜:** 2025-11-30
-**상태:** **긴급 (Urgent)** - 구조적 결함 수정 요망
+**상태:** **긴급 (Urgent)** - 시나리오 3 논리 오류 및 학습 루프 미구현
 
-## 1\. 현황 분석 및 이전 지시 사항 확인
+## 1\. 이전 지시 사항 이행 점검
 
-  * **[해결됨] CNN 파라미터 학습 차단 (Detach) 문제:** `src/scenarios/base.py`의 `build_state` 메서드에서 `.detach()` 호출이 제거됨을 확인했습니다. 정상입니다.
-  * **[해결됨] Actor-Critic 독립성 문제:** `src/models/actor_critic.py`의 `CriticNetwork`가 이제 자체적인 `feature_extractor`를 인스턴스화하고 `forward`에서 이를 사용하고 있습니다. 정상입니다.
+### 1.1 해결된 사항 (Resolved)
 
-**그러나, 아래와 같이 명세서(`Theory.md`)와 불일치하는 심각한 구현 오류가 새로 발견되었습니다.**
+**[이전 Issue 1] 시나리오 1.2 (Dual Policy)의 구조적 결함**
+`src/scenarios/unsupervised.py`의 `UnsupervisedDualPolicy` 클래스가 수정되었습니다. 기존의 Wrapper 방식에서 벗어나, `run_episode` 내부 루프에서 `exc`/`inh` 시냅스 이벤트를 구분하고 적절한 Actor(`actor_exc`, `actor_inh`)를 호출하는 로직이 정상적으로 구현되었습니다. **승인합니다.**
 
------
+### 1.2 미해결 및 신규 발견 사항 (Outstanding Issues)
 
-## 2\. 신규 위반 사항 및 수정 지시
+**[이전 Issue 2 & 3]** 시나리오 3의 Gradient 계산 로직과 `main.py`의 학습 루프가 여전히 명세를 충족하지 못하고 있습니다. 특히 시나리오 3은 겉모양만 흉내 냈을 뿐, **수학적으로 작동 불가능한 상태**입니다.
 
-### [Critical] Issue 1: 시나리오 1.2 (Dual Policy)의 잘못된 구조
+## 2\. 신규 수정 지시 사항
 
-**위반 항목:** `Theory.md` 4.2절 \~ 4.3절
+### [Critical] Issue 1: 시나리오 3 (Gradient Mimicry)의 '가짜' BPTT 구현 수정
+
+**위반 항목:** `Theory.md` 6.4절 (Surrogate Gradient + BPTT)
 **현상:**
-현재 `src/scenarios/unsupervised.py`의 `UnsupervisedDualPolicy` 클래스는 단순히 두 개의 `UnsupervisedSinglePolicy`를 감싸는(Wrapper) 형태로 구현되어 있습니다.
+현재 `src/scenarios/supervised.py`는 `teacher_delta`를 계산하기 위해 `loss.backward()`를 호출하지만, 이는 SNN의 동역학을 전혀 반영하지 못합니다.
 
 ```python
-# 현재 구현의 문제점
-def run_episode(self, episode_data: Dict) -> torch.Tensor:
-    is_inhibitory = episode_data.get("inhibitory", False)
-    if is_inhibitory:
-        return self.inh_policy.run_episode(episode_data) # 억제 시냅스만 있는 에피소드? (불가능)
-    return self.exc_policy.run_episode(episode_data)
+# 현재의 잘못된 구현 (supervised.py)
+# spikes는 main.py에서 torch.bernoulli로 생성된 상수(Constant)입니다. 미분 불가능합니다.
+prediction = (spikes.float().mean() * teacher_weight)
+loss = F.mse_loss(prediction, target_signal)
+loss.backward() 
+# 위 코드는 단순 선형 회귀의 기울기일 뿐, SNN의 시냅스 가중치에 대한 기울기가 아닙니다.
 ```
 
-**문제점:**
-
-1.  **에피소드 분리 오류:** `Theory.md`에 따르면, **하나의 에피소드(이미지 1장)** 내에서 흥분성 시냅스(Input→E)와 억제성 시냅스(I→E)가 동시에 이벤트를 발생시킵니다. 현재 코드는 흥분성 에피소드와 억제성 에피소드를 별개로 취급하고 있으며, `main.py`에서는 `inhibitory: False`로 고정하여 **억제성 정책은 아예 학습되지 않습니다.**
-2.  **정책 선택 로직 부재:** 이벤트 단위로 시냅스 타입에 따라 $\pi_{exc}$ 또는 $\pi_{inh}$를 선택하여 업데이트해야 하는데, 현재는 에피소드 통째로 하나의 정책만 사용합니다.
+`spikes` 텐서는 `main.py`의 `poisson_encode`에서 생성되는데, 여기서 `torch.bernoulli`를 사용하므로 계산 그래프(Computational Graph)가 끊겨 있습니다. 따라서 $g_i = \partial \mathcal{L} / \partial w_i$ 를 계산할 수 없습니다.
 
 **지시 사항:**
 
-  * `UnsupervisedDualPolicy`를 Wrapper가 아닌 `RLScenario`를 상속받는 독립 클래스로 재구현하십시오.
-  * `__init__`에서 두 개의 Actor (`self.actor_exc`, `self.actor_inh`)를 초기화하십시오. (Critic은 하나 공유 혹은 별도 생성, 명세 4.3절 "Critic 구조... 실험 1과 동일" 따를 것)
-  * `run_episode` 내부 반복문에서, 현재 처리 중인 이벤트가 흥분성인지 억제성인지(입력 데이터 혹은 메타데이터 기반) 판단하여 **적절한 Actor의 `sample_action`을 호출**하도록 로직을 통합하십시오.
+1.  **Differentiable Spike Generation 구현:** `src/models/lif_neuron.py` 또는 별도 유틸리티에 **Surrogate Gradient**(예: ATan, Sigmoid의 도함수 활용)를 적용한 `torch.autograd.Function`을 구현하십시오.
+      * Forward pass에서는 $v > v_{th}$ 이면 1, 아니면 0을 출력.
+      * Backward pass에서는 Heaviside step function 대신 매끄러운 함수의 도함수를 반환.
+2.  **Scenario 3의 Forward Loop 재작성:** `GradientMimicryScenario.run_episode` 내부에서 외부 `spikes` 데이터를 그대로 쓰지 말고, **실제 LIF 뉴런 모델을 통해 Forward Pass를 수행**해야 합니다.
+      * 입력(Poisson encoded input) $\rightarrow$ $W_{syn}$ (Require Grad) $\rightarrow$ LIF (Surrogate) $\rightarrow$ Output Spikes $\rightarrow$ Loss 계산
+      * 이 과정을 거쳐야 `loss.backward()` 호출 시 $W_{syn}$ 에 대한 올바른 $g_i$ (Teacher Gradient)가 생성됩니다.
 
-### [Critical] Issue 2: 시나리오 3 (Gradient Mimicry)의 Teacher Gradient 계산 누락
+### [Major] Issue 2: `main.py`의 데이터셋 순회(Iterate) 미구현
 
-**위반 항목:** `Theory.md` 6.4절 (순전파와 BPTT) 및 6.5절
+**위반 항목:** `Theory.md` 3.6절 및 8.6절
 **현상:**
-`src/scenarios/supervised.py`는 `teacher_delta`를 외부(`episode_data`)에서 입력받는 것으로 가정하고 있습니다.
+현재 `main.py`는 `dataset[0]` (이미지 단 1장)만 로드하여, 이를 `num_epochs`만큼 반복합니다. 이는 학습(Training)이 아니라 단일 샘플에 대한 오버피팅 데모입니다.
 
 ```python
 # 현재 구현
-teacher_delta: torch.Tensor = episode_data["teacher_delta"]
-# ... (내부에서 BPTT 계산 로직 없음)
+image, label = load_mnist_sample() # 이미지 1장 로드
+for epoch in range(args.num_epochs):
+    # 같은 image로 계속 반복
 ```
 
-그러나 `main.py`는 단순히 `torch.zeros(1)`을 넘겨주고 있습니다.
-**문제점:**
-
-  * **핵심 로직 부재:** `Theory.md`의 핵심인 "Surrogate Gradient + BPTT로 $g_i$ 계산" 부분이 코드 어디에도 구현되어 있지 않습니다. 이대로는 학습이 불가능합니다.
-  * `supervised.py` 혹은 이를 호출하는 상위 모듈에서 실제 SNN의 Output Layer Loss($\mathcal{L}_{sup}$)를 계산하고 `backward()`를 통해 Gradient를 추출하는 로직이 반드시 포함되어야 합니다.
-
 **지시 사항:**
 
-  * `GradientMimicryScenario` 내부 또는 `run_episode` 직전에, **실제 레이블($y$)과 SNN 출력($r_k$)을 이용해 Loss를 계산하고 BPTT를 수행하여 `teacher_delta`를 생성하는 로직**을 구현하십시오.
-  * 만약 PyTorch의 자동 미분(Autograd)을 사용하려면, 스파이크 생성 함수에 Surrogate Gradient(예: ATan, Sigmoid derivative 등)가 정의된 `autograd.Function`을 적용해야 합니다. (현재 `poisson_encode`는 `torch.bernoulli`를 써서 미분이 끊깁니다. 이를 해결하거나, 명세에 맞는 대안을 구현하십시오.)
+1.  **DataLoader 적용:** `torch.utils.data.DataLoader`를 사용하여 MNIST Training Set 전체를 로드하도록 수정하십시오.
+2.  **Epoch 루프 구조 변경:**
+    ```python
+    for epoch in range(args.num_epochs):
+        for batch_idx, (image, label) in enumerate(dataloader):
+            # 에피소드 실행 및 로깅
+    ```
+    구조로 변경하여 전체 데이터셋을 학습하도록 만드십시오.
+3.  **배치 처리는 하지 않음:** `Theory.md` 2.1절에 따라 **"이미지 1장 = 에피소드 1개"** 원칙은 유지해야 합니다. DataLoader의 `batch_size=1`로 설정하거나, 배치를 순회하며 하나씩 `run_episode`에 넘겨주십시오.
 
-### [Major] Issue 3: 학습 루프(Training Loop) 부재
+### [Normal] Issue 3: Poisson Encoding의 위치 부적절
 
-**위반 항목:** `Theory.md` 2.1절 ("이미지 1장 = 에피소드 1개... on-policy Monte Carlo") 및 8.6절 (`--num-epochs`)
+**위반 항목:** 구조적 효율성
 **현상:**
-`main.py`의 `run_demo` 함수는 단 하나의 이미지를 로드하여 **단 1회**의 에피소드만 실행(`run_episode`)하고 종료합니다.
-**문제점:**
-
-  * 강화학습은 반복적인 에피소드를 통해 이루어집니다. 현재 코드는 '실행 가능성(Feasibility)'만 보여줄 뿐, 실제 '학습(Learning)'을 시연하지 못합니다.
-  * `Theory.md`의 "학습 진행 곡선" 등을 출력하려면 반복 루프가 필수적입니다.
+현재 `main.py`에서 `poisson_encode`를 수행한 뒤 결과를 시나리오에 넘겨주고 있습니다. 시나리오 3의 수정(Issue 1)을 위해서는 시나리오 내부에서 타임스텝별로 스파이크를 발생시키거나, 입력단에서만 인코딩을 하고 내부 레이어는 동적으로 계산해야 합니다.
 
 **지시 사항:**
+`GradientMimicryScenario`의 경우, 입력 이미지를(아날로그 값) 받아 내부에서 Poisson Spike로 변환하여 SNN에 주입하는 구조, 혹은 미리 인코딩된 입력을 받아 **미분 가능한 연산**을 통해 출력 스파이크를 만드는 구조로 명확히 분리하십시오. Issue 1 해결 시 자연스럽게 수정될 부분입니다.
 
-  * `main.py`를 수정하여 `--num-epochs` (또는 에피소드 수) 만큼 반복하는 **학습 루프**를 구현하십시오.
-  * 매 에피소드마다 `optimizer.step()`이 수행되고(현재 `optimize_from_trajectory`에 구현됨), 보상(Reward)이 어떻게 변하는지 로그를 출력하도록 수정하십시오.
+## 3\. 작업 우선순위
 
------
+1.  **[1순위] `main.py`의 데이터셋 루프 구현:** 가장 수정이 쉽고 전체 실험의 기반이 됩니다.
+2.  **[2순위] Surrogate Gradient 유틸리티 작성:** 시나리오 3을 위해 필수적입니다.
+3.  **[3순위] 시나리오 3 (Supervised) 로직 전면 재작성:** 위에서 만든 유틸리티를 사용하여 실제 BPTT가 흐르도록 구현하십시오.
 
-## 3\. 작업 우선순위 요약
+**참고:** `Theory.md`의 수식 6.4절 $g_i$ 는 'Teacher가 주는 정답 가이드'입니다. 우리가 구현하는 것은 **Teacher Gradient를 계산하는 과정**까지 포함되어야 함을 잊지 마십시오.
 
-개발팀은 다음 순서대로 작업을 진행하고 보고해 주시기 바랍니다.
-
-1.  **시나리오 1.2 통합:** `UnsupervisedDualPolicy`를 단일 루프 내에서 두 정책을 스위칭하는 구조로 전면 수정.
-2.  **메인 루프 구현:** `main.py`에 에피소드 반복 및 학습 루프 추가.
-3.  **시나리오 3 보완:** `supervised.py`에 Teacher Gradient ($g_i$) 계산 로직 추가 (난이도가 높으므로, 우선순위 1, 2 해결 후 진행).
-
-`Theory.md`는 단순한 제안서가 아니라 **구현 명세**입니다. 명세에 적힌 "Pre/Post 이벤트 처리", "Actor-Critic 업데이트" 흐름이 코드에 그대로 반영되어야 함을 명심하십시오.
+[FILE END: docs/work\_order.md]
