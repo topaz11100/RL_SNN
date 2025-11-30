@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import random
+
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
@@ -36,8 +39,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inh-clip-min", type=float, default=-1.0, dest="inh_clip_min", help="Inhibitory clip lower bound")
     parser.add_argument("--inh-clip-max", type=float, default=1.0, dest="inh_clip_max", help="Inhibitory clip upper bound")
     parser.add_argument("--num-epochs", type=int, default=3, help="Number of training episodes to run")
+    parser.add_argument("--log-interval", type=int, default=100, dest="log_interval", help="Batches between log messages")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default="cpu", help="torch device identifier")
     return parser.parse_args()
+
+
+def set_seed(seed: int) -> None:
+    """Seed Python, NumPy, and torch RNGs for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def build_mnist_dataloader(batch_size: int = 1) -> DataLoader:
@@ -49,6 +65,7 @@ def build_mnist_dataloader(batch_size: int = 1) -> DataLoader:
 
 def run_training(args: argparse.Namespace) -> None:
     """Iterate across the MNIST dataset and execute the selected scenario."""
+    set_seed(args.seed)
     device = args.device
     dataloader = build_mnist_dataloader(batch_size=1)
 
@@ -131,10 +148,11 @@ def run_training(args: argparse.Namespace) -> None:
                         "clip": (args.exc_clip_min, args.exc_clip_max),
                     }
                 )
-            print(
-                f"Epoch {epoch + 1}/{args.num_epochs} batch {batch_idx + 1}/{len(dataloader)} "
-                f"reward for scenario {args.scenario}: {float(reward.item()):.4f}"
-            )
+            if batch_idx % args.log_interval == 0 or batch_idx == len(dataloader) - 1:
+                print(
+                    f"Epoch {epoch + 1}/{args.num_epochs} batch {batch_idx + 1}/{len(dataloader)} "
+                    f"reward for scenario {args.scenario}: {float(reward.item()):.4f}"
+                )
 
 
 if __name__ == "__main__":
