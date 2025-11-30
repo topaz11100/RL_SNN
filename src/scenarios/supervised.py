@@ -19,17 +19,20 @@ class GradientMimicryScenario(RLScenario):
         self,
         history_length: int,
         sigma_policy: float,
+        alpha_align: float = 1.0,
         device: str = "cpu",
     ) -> None:
         """Enable layer position input to match supervised state definition."""
         super().__init__(history_length, sigma_policy, include_layer_pos=True, device=device)
         self.buffer = RollingSpikeBuffer(history_length)
+        self.alpha_align = alpha_align
 
     def run_episode(self, episode_data: Dict) -> torch.Tensor:
         """Compare agent updates against teacher deltas using a differentiable LIF path."""
         image: torch.Tensor = episode_data["image"].to(self.device).view(-1)
         steps: int = int(episode_data.get("steps", self.history_length))
         layer_pos: float = float(episode_data.get("layer_pos", 0.0))
+        alpha_align = float(episode_data.get("alpha_align", self.alpha_align))
 
         # Teacher forward pass: Poisson input -> LIF with surrogate spikes -> loss
         input_spikes = poisson_encode(image, steps).to(self.device)
@@ -53,17 +56,25 @@ class GradientMimicryScenario(RLScenario):
         prediction = output_tensor.float().mean(dim=0)
         loss = F.mse_loss(prediction, target_signal)
         loss.backward()
-        teacher_delta: torch.Tensor = teacher_weight.grad.detach().mean().unsqueeze(0)
+        teacher_delta: torch.Tensor = -alpha_align * teacher_weight.grad.detach()
 
         # Agent policy loop now uses the differentiable spikes produced above
         clip_min, clip_max = episode_data.get("clip", (-1.0, 1.0))
-        weight: float = float(episode_data.get("weight", 0.0))
+        weight = torch.full_like(teacher_weight, float(episode_data.get("weight", 0.0)))
         trajectory: List[TrajectoryEntry] = []
-        total_agent_delta = 0.0
+        total_agent_delta = torch.zeros_like(weight)
+
+        lif_agent = LIFNeuron(
+            LIFParameters(tau_m=20.0, v_threshold=1.0, v_reset=0.0, dt=1.0),
+            soft_reset=True,
+        )
+        agent_state = lif_agent.initial_state((1,), device=self.device)
 
         for t in range(steps):
             pre = input_spikes[t]
-            post = output_tensor[t]
+            synaptic_current = torch.dot(pre, weight).view_as(agent_state.voltage)
+            agent_state = lif_agent.step(agent_state, synaptic_current)
+            post = agent_state.spike
             self.buffer.push(float(pre.mean().item()), float(post.mean().item()))
 
             events = []
@@ -74,12 +85,12 @@ class GradientMimicryScenario(RLScenario):
 
             for event_type in events:
                 spike_history, scalars, actor_state = self.build_state(
-                    self.buffer, weight, event_type, layer_pos=layer_pos
+                    self.buffer, float(weight.mean().item()), event_type, layer_pos=layer_pos
                 )
 
                 policy_out = self.actor.sample_action(actor_state)
                 value_est = self.critic(spike_history, scalars)
-                action_delta = policy_out.action.item()
+                action_delta = torch.full_like(weight, float(policy_out.action.item()))
 
                 trajectory.append(
                     TrajectoryEntry(
@@ -90,12 +101,12 @@ class GradientMimicryScenario(RLScenario):
                     )
                 )
 
-                weight += action_delta
-                weight = self.clip_weight(weight, clip_min, clip_max)
+                weight = weight + action_delta
+                weight = torch.clamp(weight, min=clip_min, max=clip_max)
                 total_agent_delta += action_delta
 
         # Theory 6.5: Reward based on difference between Agent's total update and Teacher's update
-        agent_delta_tensor = torch.tensor([total_agent_delta], device=self.device)
+        agent_delta_tensor = total_agent_delta.to(self.device)
         reward = reward_mimicry(agent_delta_tensor, teacher_delta.to(self.device))
 
         self.optimize_from_trajectory(trajectory, reward)
