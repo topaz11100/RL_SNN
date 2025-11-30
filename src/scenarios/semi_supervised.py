@@ -45,15 +45,16 @@ class SemiSupervisedScenario(RLScenario):
             if post.sum() > 0: events.append(torch.tensor([[0.0, 1.0]]))
             
             for event_type in events:
-                fused_state = self.build_state(self.buffer, weight, event_type)
-                
+                spike_history, scalars, actor_state = self.build_state(self.buffer, weight, event_type)
+
                 # Actor-Critic Interaction
-                policy_out = self.actor.sample_action(fused_state)
-                value_est = self.critic(fused_state)
+                policy_out = self.actor.sample_action(actor_state)
+                value_est = self.critic(spike_history, scalars)
                 action_delta = policy_out.action.item()
-                
+
                 trajectory.append(TrajectoryEntry(
-                    fused_state=fused_state,
+                    spike_history=spike_history,
+                    scalars=scalars,
                     log_prob=policy_out.log_prob,
                     value=value_est
                 ))

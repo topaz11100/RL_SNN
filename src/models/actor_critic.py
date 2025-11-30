@@ -58,21 +58,27 @@ class ActorNetwork(nn.Module):
 class CriticNetwork(nn.Module):
     """Value function approximator that predicts expected return from local state."""
 
-    def __init__(self, input_dim: int) -> None:
-        """Initialize the critic network."""
+    def __init__(self, input_dim_scalars: int) -> None:
+        """Initialize the critic network with its own CNN front-end.
+
+        Args:
+            input_dim_scalars: Dimensionality of scalar metadata (weight, event type, layer pos).
+        """
         super().__init__()
         self.feature_extractor = SpikeHistoryCNN()
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 32),
+            nn.Linear(16 + input_dim_scalars, 32),
             nn.ReLU(),
             nn.Linear(32, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
         )
 
-    def forward(self, fused_state: torch.Tensor) -> torch.Tensor:
-        """Predict the value for a batch of fused states."""
-        return self.mlp(fused_state)
+    def forward(self, spike_history: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
+        """Predict the value for a batch of spike histories and scalar metadata."""
+        cnn_features = self.feature_extractor(spike_history)
+        fused = torch.cat([cnn_features, scalars], dim=-1)
+        return self.mlp(fused)
 
 
 def fuse_state(spike_features: torch.Tensor, weight: torch.Tensor, event_type: torch.Tensor, layer_pos: torch.Tensor | None = None) -> torch.Tensor:
@@ -95,15 +101,17 @@ def fuse_state(spike_features: torch.Tensor, weight: torch.Tensor, event_type: t
 
 
 def actor_critic_step(
-    fused_state: torch.Tensor,
+    spike_history: torch.Tensor,
+    scalars: torch.Tensor,
     actor: ActorNetwork,
     critic: CriticNetwork,
     reward: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute losses for one batch of trajectory entries.
+    """Compute losses for one batch of trajectory entries using separate CNNs.
 
     Args:
-        fused_state: Local state vector for each event.
+        spike_history: Local spike buffer history tensor.
+        scalars: Scalar metadata tensor to fuse after CNN features.
         actor: Actor network producing Gaussian actions.
         critic: Critic network estimating returns.
         reward: Scalar reward for the episode broadcast to the batch.
@@ -111,8 +119,10 @@ def actor_critic_step(
     Returns:
         Tuple of actor loss and critic loss tensors.
     """
+    actor_features = actor.feature_extractor(spike_history)
+    fused_state = fuse_state(actor_features, scalars[:, :1], scalars[:, 1:3], scalars[:, 3:] if scalars.shape[1] > 3 else None)
     policy = actor.sample_action(fused_state)
-    value = critic(fused_state)
+    value = critic(spike_history, scalars)
     advantage = reward - value
     actor_loss = -(advantage.detach() * policy.log_prob).mean()
     critic_loss = F.mse_loss(value, reward.expand_as(value))

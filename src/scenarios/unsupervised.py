@@ -59,18 +59,19 @@ class UnsupervisedSinglePolicy(RLScenario):
             
             # Process events
             for event_type in events:
-                fused_state = self.build_state(self.buffer, weight, event_type)
-                
+                spike_history, scalars, actor_state = self.build_state(self.buffer, weight, event_type)
+
                 # Theory 2.6: Sample action Delta d
-                policy_out = self.actor.sample_action(fused_state)
+                policy_out = self.actor.sample_action(actor_state)
                 action_delta = policy_out.action.item()
-                
-                # Theory 2.7: Critic Value
-                value_est = self.critic(fused_state)
-                
+
+                # Theory 2.7: Critic Value (using critic's own CNN)
+                value_est = self.critic(spike_history, scalars)
+
                 # Store tuple (s, a_log_prob, V)
                 trajectory.append(TrajectoryEntry(
-                    fused_state=fused_state,
+                    spike_history=spike_history,
+                    scalars=scalars,
                     log_prob=policy_out.log_prob,
                     value=value_est
                 ))

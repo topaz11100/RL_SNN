@@ -8,7 +8,6 @@ from torch import optim
 import torch.nn.functional as F
 
 from src.models.actor_critic import ActorNetwork, CriticNetwork, fuse_state
-from src.models.cnn_frontend import SpikeHistoryCNN
 from src.utils.spike_buffer import RollingSpikeBuffer
 
 
@@ -18,7 +17,8 @@ class TrajectoryEntry:
     
     Updated to comply with Theory 2.8: Stores state, action (implicitly via log_prob), and value.
     """
-    fused_state: torch.Tensor
+    spike_history: torch.Tensor
+    scalars: torch.Tensor
     log_prob: torch.Tensor  # Log probability of the taken action
     value: torch.Tensor     # Value estimate by Critic at that step
 
@@ -38,40 +38,42 @@ class RLScenario:
         self.include_layer_pos = include_layer_pos
         self.device = device
         
-        # Dimensions: CNN output(16) + weight(1) + event_type(2) + [layer_pos(1)]
-        fused_dim = 16 + 1 + 2 + (1 if include_layer_pos else 0)
-        
-        self.actor = ActorNetwork(input_dim=fused_dim, sigma=sigma_policy).to(device)
-        self.critic = CriticNetwork(input_dim=fused_dim).to(device)
+        self.scalar_dim = 1 + 2 + (1 if include_layer_pos else 0)
+
+        # Dimensions: CNN output(16) + scalar metadata
+        actor_input_dim = 16 + self.scalar_dim
+
+        self.actor = ActorNetwork(input_dim=actor_input_dim, sigma=sigma_policy).to(device)
+        self.critic = CriticNetwork(input_dim_scalars=self.scalar_dim).to(device)
         
         # Learning rates not specified in snippet, using defaults but can be parameterized
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=1e-3)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=1e-3)
 
-    def build_state(self, buffer: RollingSpikeBuffer, weight: float, event_type: torch.Tensor, layer_pos: Optional[float] = None) -> torch.Tensor:
-        """Construct the fused local state tensor for a single event."""
+    def build_state(
+        self,
+        buffer: RollingSpikeBuffer,
+        weight: float,
+        event_type: torch.Tensor,
+        layer_pos: Optional[float] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Construct spike history, scalar metadata, and actor fused state for one event."""
         spike_tensor = buffer.batch(batch_size=1).to(self.device)
-        # Note: In a real efficient implementation, CNN shouldn't be re-instantiated every step.
-        # But keeping structure for now. Assuming self.actor has the feature extractor if shared weights intended,
-        # otherwise creating new CNN here implies random weights every step which is wrong.
-        # Theory 2.4 says: "All Actor/Critic have IDENTICAL 1D CNN front-end structure... 
-        # but parameters are NOT shared."
-        # The provided implementation of build_state instantiates a NEW CNN() every call. 
-        # This is strictly WRONG because features won't be learned.
-        # FIX: Use the actor's feature extractor for state construction or handle inside model.
-        # However, to avoid breaking 'fuse_state' signature compatibility in 'models', 
-        # we will use the actor's feature extractor here to get consistent features.
-        
-        features = self.actor.feature_extractor(spike_tensor).detach() # Detach as this is input state
-        
+
         weight_tensor = torch.tensor([[weight]], device=self.device)
         if layer_pos is not None and self.include_layer_pos:
             layer_tensor = torch.tensor([[layer_pos]], device=self.device)
         else:
             layer_tensor = None
-            
-        fused = fuse_state(features, weight_tensor, event_type.to(self.device), layer_tensor)
-        return fused
+
+        scalar_parts = [weight_tensor, event_type.to(self.device)]
+        if layer_tensor is not None:
+            scalar_parts.append(layer_tensor)
+        scalars = torch.cat(scalar_parts, dim=-1)
+
+        actor_features = self.actor.feature_extractor(spike_tensor)
+        fused = fuse_state(actor_features, weight_tensor, event_type.to(self.device), layer_tensor)
+        return spike_tensor, scalars, fused
 
     def run_episode(self, episode_data: Dict) -> torch.Tensor:
         """Run one episode and return the scalar reward."""
