@@ -32,18 +32,48 @@ class SemiSupervisedScenario(RLScenario):
         clip_min, clip_max = episode_data.get("clip", (-1.0, 1.0))
         trajectory: List[TrajectoryEntry] = []
 
+        # Iterate over time steps (T_semi)
         for t in range(spikes.shape[0]):
             pre = spikes[t]
-            post = spikes[t]
+            post = spikes[t] # Simplified: assuming auto-association or layer input-output for demo
+            
             self.buffer.push(float(pre.mean().item()), float(post.mean().item()))
-            event_type = torch.tensor([[1.0, 0.0]]) if pre.sum() > 0 else torch.tensor([[0.0, 1.0]])
-            fused_state = self.build_state(self.buffer, weight, event_type)
-            trajectory.append(TrajectoryEntry(fused_state=fused_state))
-            weight = self.clip_weight(weight, clip_min, clip_max)
+            
+            # Identify events
+            events = []
+            if pre.sum() > 0: events.append(torch.tensor([[1.0, 0.0]]))
+            if post.sum() > 0: events.append(torch.tensor([[0.0, 1.0]]))
+            
+            for event_type in events:
+                fused_state = self.build_state(self.buffer, weight, event_type)
+                
+                # Actor-Critic Interaction
+                policy_out = self.actor.sample_action(fused_state)
+                value_est = self.critic(fused_state)
+                action_delta = policy_out.action.item()
+                
+                trajectory.append(TrajectoryEntry(
+                    fused_state=fused_state,
+                    log_prob=policy_out.log_prob,
+                    value=value_est
+                ))
+                
+                weight += action_delta
+                weight = self.clip_weight(weight, clip_min, clip_max)
 
+        # Theory 5.4: Reward Calculation
         firing_rates = spikes.float().mean(dim=0)
         predicted = int(torch.argmax(firing_rates).item())
-        margin = float((firing_rates[label] - torch.max(torch.cat([firing_rates[:label], firing_rates[label + 1 :]]))).item())
+        
+        # Calculate Margin
+        if len(firing_rates) > 1:
+            other_rates = torch.cat([firing_rates[:label], firing_rates[label + 1 :]])
+            max_wrong = torch.max(other_rates)
+            margin = float((firing_rates[label] - max_wrong).item())
+        else:
+            margin = 0.0 # Single neuron case
+            
         reward = reward_classification(predicted == label, margin, self.beta_margin)
+        
         self.optimize_from_trajectory(trajectory, reward)
         return reward.detach()
