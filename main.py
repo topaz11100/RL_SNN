@@ -19,7 +19,18 @@ def parse_args() -> argparse.Namespace:
     """Parse command line arguments for selecting scenarios and hyperparameters."""
     parser = argparse.ArgumentParser(description="RL-driven synaptic plasticity experiments")
     parser.add_argument("--scenario", choices=["1.1", "1.2", "2", "3"], required=True, help="Experiment scenario identifier")
+    parser.add_argument("--run-name", type=str, default="default", help="Run name used for logging")
     parser.add_argument("--history-length", type=int, default=16, help="Spike history length L")
+    parser.add_argument("--dt", type=float, default=1.0, help="Simulation timestep for LIF neurons")
+    parser.add_argument("--N-E", type=int, default=1, dest="N_E", help="Number of excitatory neurons")
+    parser.add_argument("--N-hidden", type=int, default=0, dest="N_hidden", help="Number of hidden neurons")
+    parser.add_argument("--lif-tau-m", type=float, default=20.0, dest="lif_tau_m", help="LIF membrane time constant")
+    parser.add_argument("--lif-v-threshold", type=float, default=1.0, dest="lif_v_threshold", help="LIF firing threshold")
+    parser.add_argument("--lif-v-reset", type=float, default=0.0, dest="lif_v_reset", help="LIF reset potential")
+    parser.add_argument("--lr-actor", type=float, default=1e-3, dest="lr_actor", help="Actor learning rate")
+    parser.add_argument("--lr-critic", type=float, default=1e-3, dest="lr_critic", help="Critic learning rate")
+    parser.add_argument("--alpha-align", type=float, default=1.0, dest="alpha_align", help="Gradient mimicry alignment scale")
+    parser.add_argument("--log-gradient-stats", action="store_true", help="Enable gradient statistics logging")
     parser.add_argument("--T-unsup1", type=int, default=4, dest="T_unsup1", help="Scenario 1.1 timestep count")
     parser.add_argument("--T-unsup2", type=int, default=4, dest="T_unsup2", help="Scenario 1.2 timestep count")
     parser.add_argument("--T-semi", type=int, default=4, dest="T_semi", help="Scenario 2 timestep count")
@@ -79,7 +90,10 @@ def run_training(args: argparse.Namespace) -> None:
             alpha_sparse=args.alpha_sparse,
             alpha_div=args.alpha_div,
             alpha_stab=args.alpha_stab,
-            num_exc_neurons=1,
+            num_exc_neurons=args.N_E,
+            lr_actor=args.lr_actor,
+            lr_critic=args.lr_critic,
+            run_name=args.run_name,
             device=device,
         )
     elif args.scenario == "1.2":
@@ -92,7 +106,10 @@ def run_training(args: argparse.Namespace) -> None:
             alpha_sparse=args.alpha_sparse,
             alpha_div=args.alpha_div,
             alpha_stab=args.alpha_stab,
-            num_exc_neurons=1,
+            num_exc_neurons=args.N_E,
+            lr_actor=args.lr_actor,
+            lr_critic=args.lr_critic,
+            run_name=args.run_name,
             device=device,
         )
     elif args.scenario == "2":
@@ -101,11 +118,28 @@ def run_training(args: argparse.Namespace) -> None:
             history_length=args.history_length,
             sigma_policy=args.sigma_semi,
             beta_margin=args.beta_margin,
+            num_hidden=args.N_hidden,
+            lr_actor=args.lr_actor,
+            lr_critic=args.lr_critic,
+            run_name=args.run_name,
             device=device,
         )
     else:
         steps = args.T_sup
-        scenario = GradientMimicryScenario(history_length=args.history_length, sigma_policy=args.sigma_sup, device=device)
+        scenario = GradientMimicryScenario(
+            history_length=args.history_length,
+            sigma_policy=args.sigma_sup,
+            alpha_align=args.alpha_align,
+            lr_actor=args.lr_actor,
+            lr_critic=args.lr_critic,
+            lif_tau_m=args.lif_tau_m,
+            lif_v_threshold=args.lif_v_threshold,
+            lif_v_reset=args.lif_v_reset,
+            dt=args.dt,
+            log_gradient_stats=args.log_gradient_stats,
+            run_name=args.run_name,
+            device=device,
+        )
 
     for epoch in range(args.num_epochs):
         for batch_idx, (image, label) in enumerate(dataloader):

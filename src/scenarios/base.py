@@ -31,13 +31,17 @@ class RLScenario:
         history_length: int,
         sigma_policy: float,
         include_layer_pos: bool = False,
+        lr_actor: float = 1e-3,
+        lr_critic: float = 1e-3,
+        run_name: str = "default",
         device: str = "cpu",
     ) -> None:
         """Prepare shared components for all scenarios."""
         self.history_length = history_length
         self.include_layer_pos = include_layer_pos
         self.device = device
-        
+        self.run_name = run_name
+
         self.scalar_dim = 1 + 2 + (1 if include_layer_pos else 0)
 
         # Dimensions: CNN output(16) + scalar metadata
@@ -47,8 +51,8 @@ class RLScenario:
         self.critic = CriticNetwork(input_dim_scalars=self.scalar_dim).to(device)
         
         # Learning rates not specified in snippet, using defaults but can be parameterized
-        self.actor_opt = optim.Adam(self.actor.parameters(), lr=1e-3)
-        self.critic_opt = optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr_actor)
+        self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr_critic)
 
     def build_state(
         self,

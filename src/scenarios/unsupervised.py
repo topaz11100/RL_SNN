@@ -23,10 +23,21 @@ class UnsupervisedSinglePolicy(RLScenario):
         alpha_div: float,
         alpha_stab: float,
         num_exc_neurons: int,
+        lr_actor: float = 1e-3,
+        lr_critic: float = 1e-3,
+        run_name: str = "default",
         device: str = "cpu",
     ) -> None:
         """Initialize buffers and reward tracker."""
-        super().__init__(history_length, sigma_policy, include_layer_pos=False, device=device)
+        super().__init__(
+            history_length,
+            sigma_policy,
+            include_layer_pos=False,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            run_name=run_name,
+            device=device,
+        )
         self.buffer = RollingSpikeBuffer(history_length)
         self.tracker = WinnerTracker(num_exc_neurons)
         self.rho_target = rho_target
@@ -122,10 +133,21 @@ class UnsupervisedDualPolicy(RLScenario):
         alpha_div: float,
         alpha_stab: float,
         num_exc_neurons: int,
+        lr_actor: float = 1e-3,
+        lr_critic: float = 1e-3,
+        run_name: str = "default",
         device: str = "cpu",
     ) -> None:
         """Initialize shared critic and two actors for dual-policy control."""
-        super().__init__(history_length, sigma_exc, include_layer_pos=False, device=device)
+        super().__init__(
+            history_length,
+            sigma_exc,
+            include_layer_pos=False,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            run_name=run_name,
+            device=device,
+        )
         self.buffer = RollingSpikeBuffer(history_length)
         self.tracker = WinnerTracker(num_exc_neurons)
         self.rho_target = rho_target
@@ -138,9 +160,9 @@ class UnsupervisedDualPolicy(RLScenario):
         self.actor_inh = ActorNetwork(input_dim=16 + 3, sigma=sigma_inh).to(device)
         self.critic = CriticNetwork(input_dim_scalars=3).to(device)
 
-        self.actor_exc_opt = torch.optim.Adam(self.actor_exc.parameters(), lr=1e-3)
-        self.actor_inh_opt = torch.optim.Adam(self.actor_inh.parameters(), lr=1e-3)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.actor_exc_opt = torch.optim.Adam(self.actor_exc.parameters(), lr=lr_actor)
+        self.actor_inh_opt = torch.optim.Adam(self.actor_inh.parameters(), lr=lr_actor)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
 
     def _build_state(
         self, actor: ActorNetwork, weight: float, event_type: torch.Tensor

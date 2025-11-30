@@ -17,12 +17,25 @@ class SemiSupervisedScenario(RLScenario):
         history_length: int,
         sigma_policy: float,
         beta_margin: float,
+        num_hidden: int = 0,
+        lr_actor: float = 1e-3,
+        lr_critic: float = 1e-3,
+        run_name: str = "default",
         device: str = "cpu",
     ) -> None:
         """Initialize buffers and reward weights for the semi-supervised task."""
-        super().__init__(history_length, sigma_policy, include_layer_pos=False, device=device)
+        super().__init__(
+            history_length,
+            sigma_policy,
+            include_layer_pos=False,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            run_name=run_name,
+            device=device,
+        )
         self.buffer = RollingSpikeBuffer(history_length)
         self.beta_margin = beta_margin
+        self.num_hidden = num_hidden
 
     def run_episode(self, episode_data: Dict) -> torch.Tensor:
         """Compute classification reward using firing rates and update networks."""

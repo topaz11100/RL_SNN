@@ -20,12 +20,35 @@ class GradientMimicryScenario(RLScenario):
         history_length: int,
         sigma_policy: float,
         alpha_align: float = 1.0,
+        lr_actor: float = 1e-3,
+        lr_critic: float = 1e-3,
+        lif_tau_m: float = 20.0,
+        lif_v_threshold: float = 1.0,
+        lif_v_reset: float = 0.0,
+        dt: float = 1.0,
+        log_gradient_stats: bool = False,
+        run_name: str = "default",
         device: str = "cpu",
     ) -> None:
         """Enable layer position input to match supervised state definition."""
-        super().__init__(history_length, sigma_policy, include_layer_pos=True, device=device)
+        super().__init__(
+            history_length,
+            sigma_policy,
+            include_layer_pos=True,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            run_name=run_name,
+            device=device,
+        )
         self.buffer = RollingSpikeBuffer(history_length)
         self.alpha_align = alpha_align
+        self.log_gradient_stats = log_gradient_stats
+        self.lif_params = LIFParameters(
+            tau_m=lif_tau_m,
+            v_threshold=lif_v_threshold,
+            v_reset=lif_v_reset,
+            dt=dt,
+        )
 
     def run_episode(self, episode_data: Dict) -> torch.Tensor:
         """Compare agent updates against teacher deltas using a differentiable LIF path."""
@@ -36,10 +59,7 @@ class GradientMimicryScenario(RLScenario):
 
         # Teacher forward pass: Poisson input -> LIF with surrogate spikes -> loss
         input_spikes = poisson_encode(image, steps).to(self.device)
-        lif = LIFNeuron(
-            LIFParameters(tau_m=20.0, v_threshold=1.0, v_reset=0.0, dt=1.0),
-            soft_reset=True,
-        )
+        lif = LIFNeuron(self.lif_params, soft_reset=True)
         teacher_weight = torch.nn.Parameter(
             torch.full((image.numel(),), float(episode_data.get("weight", 0.0)), device=self.device)
         )
@@ -64,10 +84,7 @@ class GradientMimicryScenario(RLScenario):
         trajectory: List[TrajectoryEntry] = []
         total_agent_delta = torch.zeros_like(weight)
 
-        lif_agent = LIFNeuron(
-            LIFParameters(tau_m=20.0, v_threshold=1.0, v_reset=0.0, dt=1.0),
-            soft_reset=True,
-        )
+        lif_agent = LIFNeuron(self.lif_params, soft_reset=True)
         agent_state = lif_agent.initial_state((1,), device=self.device)
 
         for t in range(steps):
@@ -107,7 +124,16 @@ class GradientMimicryScenario(RLScenario):
 
         # Theory 6.5: Reward based on difference between Agent's total update and Teacher's update
         agent_delta_tensor = total_agent_delta.to(self.device)
-        reward = reward_mimicry(agent_delta_tensor, teacher_delta.to(self.device))
+        teacher_delta_device = teacher_delta.to(self.device)
+        reward = reward_mimicry(agent_delta_tensor, teacher_delta_device)
+
+        if self.log_gradient_stats:
+            with torch.no_grad():
+                print(
+                    f"[GradientStats:{self.run_name}] teacher_delta mean={teacher_delta_device.mean().item():.4f} "
+                    f"std={teacher_delta_device.std(unbiased=False).item():.4f} "
+                    f"agent_delta mean={agent_delta_tensor.mean().item():.4f} std={agent_delta_tensor.std(unbiased=False).item():.4f}"
+                )
 
         self.optimize_from_trajectory(trajectory, reward)
         return reward.detach()
