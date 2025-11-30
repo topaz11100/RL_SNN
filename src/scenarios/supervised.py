@@ -26,21 +26,48 @@ class GradientMimicryScenario(RLScenario):
         """Compare agent updates against teacher deltas and optimize."""
         spikes: torch.Tensor = episode_data["spikes"]
         layer_pos: float = float(episode_data.get("layer_pos", 0.0))
-        agent_delta: torch.Tensor = episode_data["agent_delta"]
+        # Note: In a real run, agent_delta is accumulated from the actor's outputs.
+        # But for reward calculation, we might need the Total Delta over the episode or step-wise.
+        # Theory 6.5: R_i = - (Delta w_agent - Delta w_teacher)^2
+        # We accumulate agent actions to get total Delta w_agent.
+        
         teacher_delta: torch.Tensor = episode_data["teacher_delta"]
         weight: float = float(episode_data.get("weight", 0.0))
+        initial_weight = weight
         clip_min, clip_max = episode_data.get("clip", (-1.0, 1.0))
         trajectory: List[TrajectoryEntry] = []
+
+        total_agent_delta = 0.0
 
         for t in range(spikes.shape[0]):
             pre = spikes[t]
             post = spikes[t]
             self.buffer.push(float(pre.mean().item()), float(post.mean().item()))
-            event_type = torch.tensor([[1.0, 0.0]]) if pre.sum() > 0 else torch.tensor([[0.0, 1.0]])
-            fused_state = self.build_state(self.buffer, weight, event_type, layer_pos=layer_pos)
-            trajectory.append(TrajectoryEntry(fused_state=fused_state))
-            weight = self.clip_weight(weight, clip_min, clip_max)
+            
+            events = []
+            if pre.sum() > 0: events.append(torch.tensor([[1.0, 0.0]]))
+            if post.sum() > 0: events.append(torch.tensor([[0.0, 1.0]]))
+            
+            for event_type in events:
+                fused_state = self.build_state(self.buffer, weight, event_type, layer_pos=layer_pos)
+                
+                policy_out = self.actor.sample_action(fused_state)
+                value_est = self.critic(fused_state)
+                action_delta = policy_out.action.item()
+                
+                trajectory.append(TrajectoryEntry(
+                    fused_state=fused_state,
+                    log_prob=policy_out.log_prob,
+                    value=value_est
+                ))
+                
+                weight += action_delta
+                weight = self.clip_weight(weight, clip_min, clip_max)
+                total_agent_delta += action_delta
 
-        reward = reward_mimicry(agent_delta, teacher_delta)
+        # Theory 6.5: Reward based on difference between Agent's total update and Teacher's update
+        agent_delta_tensor = torch.tensor([total_agent_delta], device=self.device)
+        reward = reward_mimicry(agent_delta_tensor, teacher_delta.to(self.device))
+        
         self.optimize_from_trajectory(trajectory, reward)
         return reward.detach()
