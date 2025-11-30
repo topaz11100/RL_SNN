@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 import torch
+import torch.nn.functional as F
 
 from src.scenarios.base import RLScenario, TrajectoryEntry
 from src.utils.reward import reward_mimicry
@@ -30,10 +31,15 @@ class GradientMimicryScenario(RLScenario):
         # But for reward calculation, we might need the Total Delta over the episode or step-wise.
         # Theory 6.5: R_i = - (Delta w_agent - Delta w_teacher)^2
         # We accumulate agent actions to get total Delta w_agent.
-        
-        teacher_delta: torch.Tensor = episode_data["teacher_delta"]
+
+        label: int = int(episode_data.get("label", 0))
+        target_signal = torch.tensor([float(label) / 9.0], device=self.device)
+        teacher_weight = torch.nn.Parameter(torch.tensor([episode_data.get("weight", 0.0)], device=self.device))
+        prediction = (spikes.to(self.device).float().mean() * teacher_weight).unsqueeze(0)
+        loss = F.mse_loss(prediction, target_signal)
+        loss.backward()
+        teacher_delta: torch.Tensor = teacher_weight.grad.detach()
         weight: float = float(episode_data.get("weight", 0.0))
-        initial_weight = weight
         clip_min, clip_max = episode_data.get("clip", (-1.0, 1.0))
         trajectory: List[TrajectoryEntry] = []
 
