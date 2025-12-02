@@ -36,6 +36,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppo-eps", type=float, default=0.2, help="PPO clipping epsilon")
     parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO epochs per update")
     parser.add_argument("--ppo-batch-size", type=int, default=8, help="Mini-batch size inside PPO update")
+    parser.add_argument(
+        "--exc-clip-min",
+        type=float,
+        default=0.0,
+        help="Lower bound for excitatory synapse weights",
+    )
+    parser.add_argument(
+        "--exc-clip-max",
+        type=float,
+        default=1.0,
+        help="Upper bound for excitatory synapse weights",
+    )
+    parser.add_argument(
+        "--inh-clip-min",
+        type=float,
+        default=0.0,
+        help="Lower bound for inhibitory synapse weights (magnitude before sign)",
+    )
+    parser.add_argument(
+        "--inh-clip-max",
+        type=float,
+        default=1.0,
+        help="Upper bound for inhibitory synapse weights (magnitude before sign)",
+    )
+    parser.add_argument(
+        "--local-lr",
+        type=float,
+        default=0.01,
+        help="Local learning rate η_w used in Δw_i(t) = η_w * s_scen * Δd_i(t)",
+    )
     parser.add_argument("--rho-target", type=float, default=0.1, help="Target firing rate for sparsity reward")
     parser.add_argument("--alpha-sparse", type=float, default=1.0, help="Weight for sparsity reward")
     parser.add_argument("--alpha-div", type=float, default=0.1, help="Weight for diversity reward")
