@@ -10,6 +10,7 @@ from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
+from snn.lif import LIFParams
 from snn.network_semi_supervised import SemiSupervisedNetwork
 
 
@@ -125,7 +126,10 @@ def run_semi(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
-    network = SemiSupervisedNetwork().to(device)
+    lif_params = LIFParams(dt=args.dt)
+    network = SemiSupervisedNetwork(
+        n_hidden=args.N_hidden, hidden_params=lif_params, output_params=lif_params
+    ).to(device)
     actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=3).to(device)
     critic = ValueFunction(extra_feature_dim=3).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
@@ -161,7 +165,8 @@ def run_semi(args, logger):
                 value = critic(state, extra)
 
                 with torch.no_grad():
-                    _scatter_updates(0.01 * action, pre_idx, post_idx, network.w_hidden_output)
+                    _scatter_updates(args.local_lr * action, pre_idx, post_idx, network.w_hidden_output)
+                    torch.clamp_(network.w_hidden_output, args.exc_clip_min, args.exc_clip_max)
 
                 episode_buffer = EpisodeBuffer()
                 for i in range(state.size(0)):
@@ -201,12 +206,13 @@ def run_semi(args, logger):
         with open(metrics_test, "a") as f:
             f.write(f"{epoch}\t{test_acc:.6f}\t{test_margin:.6f}\t{test_reward:.6f}\n")
 
-        logger.info(
-            "Epoch %d | Train acc %.4f margin %.4f reward %.4f | Val acc %.4f | Test acc %.4f",
-            epoch,
-            mean_acc,
-            mean_margin,
-            mean_reward,
-            val_acc,
-            test_acc,
-        )
+        if epoch % args.log_interval == 0:
+            logger.info(
+                "Epoch %d | Train acc %.4f margin %.4f reward %.4f | Val acc %.4f | Test acc %.4f",
+                epoch,
+                mean_acc,
+                mean_margin,
+                mean_reward,
+                val_acc,
+                test_acc,
+            )

@@ -10,6 +10,7 @@ from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
+from snn.lif import LIFParams
 from snn.network_diehl_cook import DiehlCookNetwork
 
 
@@ -100,7 +101,8 @@ def run_unsup2(args, logger):
     base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
     prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
 
-    network = DiehlCookNetwork().to(device)
+    lif_params = LIFParams(dt=args.dt)
+    network = DiehlCookNetwork(n_exc=args.N_E, n_inh=args.N_E, exc_params=lif_params, inh_params=lif_params).to(device)
 
     actor_exc = GaussianPolicy(sigma=args.sigma_unsup2, extra_feature_dim=3).to(device)
     critic_exc = ValueFunction(extra_feature_dim=3).to(device)
@@ -215,11 +217,12 @@ def run_unsup2(args, logger):
         with open(metrics_path, "a") as f:
             f.write(f"{epoch}\t{mean_sparse:.6f}\t{mean_div:.6f}\t{mean_stab:.6f}\t{mean_total:.6f}\n")
 
-        logger.info(
-            "Epoch %d | R_sparse %.4f | R_div %.4f | R_stab %.4f | R_total %.4f",
-            epoch,
-            mean_sparse,
-            mean_div,
-            mean_stab,
-            mean_total,
-        )
+        if epoch % args.log_interval == 0:
+            logger.info(
+                "Epoch %d | R_sparse %.4f | R_div %.4f | R_stab %.4f | R_total %.4f",
+                epoch,
+                mean_sparse,
+                mean_div,
+                mean_stab,
+                mean_total,
+            )

@@ -10,6 +10,7 @@ from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
+from snn.lif import LIFParams
 from snn.network_grad_mimicry import GradMimicryNetwork
 
 
@@ -111,8 +112,9 @@ def run_grad(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
-    network = GradMimicryNetwork().to(device)
-    teacher = GradMimicryNetwork().to(device)
+    lif_params = LIFParams(dt=args.dt)
+    network = GradMimicryNetwork(hidden_params=lif_params, output_params=lif_params).to(device)
+    teacher = GradMimicryNetwork(hidden_params=lif_params, output_params=lif_params).to(device)
     actor = GaussianPolicy(sigma=getattr(args, "sigma_sup", args.sigma_unsup1), extra_feature_dim=4).to(device)
     critic = ValueFunction(extra_feature_dim=4).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
@@ -141,10 +143,18 @@ def run_grad(args, logger):
 
             for b in range(input_spikes.size(0)):
                 events_in = _gather_events(
-                    input_spikes[b : b + 1], hidden_spikes[b : b + 1], network.w_input_hidden, args.spike_array_len, 0.0
+                    input_spikes[b : b + 1],
+                    hidden_spikes[b : b + 1],
+                    network.w_input_hidden,
+                    args.spike_array_len,
+                    0.0 * args.layer_index_scale,
                 )
                 events_out = _gather_events(
-                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len, 1.0
+                    hidden_spikes[b : b + 1],
+                    output_spikes[b : b + 1],
+                    network.w_hidden_output,
+                    args.spike_array_len,
+                    1.0 * args.layer_index_scale,
                 )
 
                 state_batches = []
@@ -174,14 +184,14 @@ def run_grad(args, logger):
                     if events_in[0].numel() > 0:
                         count_in = layer_slices[0]
                         delta_in = _scatter_updates(
-                            0.01 * action[offset : offset + count_in], events_in[2], events_in[3], network.w_input_hidden
+                            args.local_lr * action[offset : offset + count_in], events_in[2], events_in[3], network.w_input_hidden
                         )
                         total_delta_in += delta_in
                         offset += count_in
                     if events_out[0].numel() > 0:
                         count_out = layer_slices[-1] if events_in[0].numel() == 0 else layer_slices[1]
                         delta_out = _scatter_updates(
-                            0.01 * action[offset : offset + count_out], events_out[2], events_out[3], network.w_hidden_output
+                            args.local_lr * action[offset : offset + count_out], events_out[2], events_out[3], network.w_hidden_output
                         )
                         total_delta_out += delta_out
                 else:
@@ -243,12 +253,15 @@ def run_grad(args, logger):
         with open(metrics_test, "a") as f:
             f.write(f"{epoch}\t{test_acc:.6f}\t{test_reward:.6f}\t0.000000\n")
 
-        logger.info(
-            "Epoch %d | Train acc %.4f reward %.4f align %.4f | Val acc %.4f | Test acc %.4f",
-            epoch,
-            mean_acc,
-            mean_reward,
-            mean_align,
-            val_acc,
-            test_acc,
-        )
+        if epoch % args.log_interval == 0:
+            logger.info(
+                "Epoch %d | Train acc %.4f reward %.4f align %.4f | Val acc %.4f | Test acc %.4f",
+                epoch,
+                mean_acc,
+                mean_reward,
+                mean_align,
+                val_acc,
+                test_acc,
+            )
+            if args.log_gradient_stats:
+                logger.info("Gradient alignment mean (train): %.4f", mean_align)
