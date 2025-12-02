@@ -1,0 +1,51 @@
+import argparse
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SNN PPO experiments on MNIST")
+    parser.add_argument(
+        "--scenario",
+        choices=["unsup1", "unsup2", "semi", "grad"],
+        required=True,
+        help="Select experiment scenario",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument(
+        "--batch-size-images",
+        type=int,
+        default=32,
+        help="Mini-batch size in number of images",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=1,
+        help="Number of epochs for training (default for smoke tests)",
+    )
+    parser.add_argument("--T-unsup1", type=int, default=10, help="Timesteps for unsupervised scenario 1")
+    parser.add_argument("--T-unsup2", type=int, default=10, help="Timesteps for unsupervised scenario 2")
+    parser.add_argument("--T-semi", type=int, default=10, help="Timesteps for semi-supervised scenario")
+    parser.add_argument("--T-sup", type=int, default=10, help="Timesteps for supervised gradient mimicry")
+    parser.add_argument("--spike-array-len", type=int, default=20, help="Spike history length L for policy inputs")
+    parser.add_argument("--sigma-unsup1", type=float, default=0.1, help="Gaussian sigma for unsup1 policy")
+    parser.add_argument("--sigma-unsup2", type=float, default=0.1, help="Gaussian sigma for unsup2 policies")
+    parser.add_argument("--sigma-semi", type=float, default=0.1, help="Gaussian sigma for semi-supervised policy")
+    parser.add_argument("--sigma-sup", type=float, default=0.1, help="Gaussian sigma for gradient mimicry policy")
+    parser.add_argument("--lr-actor", type=float, default=1e-3, help="Learning rate for actor")
+    parser.add_argument("--lr-critic", type=float, default=1e-3, help="Learning rate for critic")
+    parser.add_argument("--ppo-eps", type=float, default=0.2, help="PPO clipping epsilon")
+    parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO epochs per update")
+    parser.add_argument("--ppo-batch-size", type=int, default=8, help="Mini-batch size inside PPO update")
+    parser.add_argument("--rho-target", type=float, default=0.1, help="Target firing rate for sparsity reward")
+    parser.add_argument("--alpha-sparse", type=float, default=1.0, help="Weight for sparsity reward")
+    parser.add_argument("--alpha-div", type=float, default=0.1, help="Weight for diversity reward")
+    parser.add_argument("--alpha-stab", type=float, default=0.1, help="Weight for stability reward")
+    parser.add_argument("--beta-margin", type=float, default=0.5, help="Weight for margin reward")
+    parser.add_argument("--alpha-align", type=float, default=0.1, help="Alignment step size for gradient mimicry")
+    parser.add_argument("--max-rate", type=float, default=1.0, help="Maximal firing rate for Poisson encoder")
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
+    return parser.parse_args()
