@@ -12,18 +12,20 @@ class DiehlCookNetwork(nn.Module):
         n_input: int = 784,
         n_exc: int = 100,
         n_inh: int = 100,
+        weight_ei: float = 1.0,
         exc_params: Optional[LIFParams] = None,
         inh_params: Optional[LIFParams] = None,
     ):
         super().__init__()
+        assert n_exc == n_inh, "Diehl–Cook network assumes n_exc == n_inh for 1:1 E→I mapping"
         self.n_input = n_input
         self.n_exc = n_exc
         self.n_inh = n_inh
+        self.weight_ei = weight_ei
         self.exc_params = exc_params if exc_params is not None else LIFParams()
         self.inh_params = inh_params if inh_params is not None else LIFParams()
 
         self.w_input_exc = nn.Parameter(torch.rand(n_input, n_exc) * 0.1)
-        self.w_exc_inh = nn.Parameter(torch.rand(n_exc, n_inh) * 0.1)
         self.w_inh_exc = nn.Parameter(torch.rand(n_inh, n_exc) * 0.1)
 
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
@@ -56,7 +58,7 @@ class DiehlCookNetwork(nn.Module):
             I_exc = torch.matmul(x_t, torch.relu(self.w_input_exc)) - torch.matmul(s_inh_prev, torch.relu(self.w_inh_exc))
             v_exc, s_exc = lif_step(v_exc, I_exc, self.exc_params)
 
-            I_inh = torch.matmul(s_exc_prev, torch.relu(self.w_exc_inh))
+            I_inh = self.weight_ei * s_exc_prev
             v_inh, s_inh = lif_step(v_inh, I_inh, self.inh_params)
 
             exc_spikes[:, :, t] = s_exc

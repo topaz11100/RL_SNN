@@ -149,7 +149,9 @@ def run_unsup1(args, logger):
                 value = critic(state, extra)
 
                 with torch.no_grad():
-                    _scatter_updates(0.01 * action, pre_idx, post_idx, network.w_input_exc)
+                    # Δw_i(t) = η_w * s_scen * Δd_i(t); unsup1 uses s_scen = 1
+                    _scatter_updates(args.local_lr * action, pre_idx, post_idx, network.w_input_exc)
+                    torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
 
                 episode_buffer = EpisodeBuffer()
                 for i in range(state.size(0)):
