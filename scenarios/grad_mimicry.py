@@ -89,7 +89,7 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
     network.eval()
     accuracies, rewards = [], []
     with torch.no_grad():
-        for images, labels in loader:
+        for images, labels, _ in loader:
             images = images.to(device)
             labels = labels.to(device)
             spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate).to(device)
@@ -127,7 +127,7 @@ def run_grad(args, logger):
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_reward, epoch_align = [], [], []
-        for images, labels in train_loader:
+        for images, labels, _ in train_loader:
             images = images.to(device)
             labels = labels.to(device)
             input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate).to(device)
@@ -136,6 +136,8 @@ def run_grad(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             epoch_acc.append((preds == labels).float().mean().item())
+
+            batch_buffer = EpisodeBuffer()
 
             for b in range(input_spikes.size(0)):
                 events_in = _gather_events(
@@ -158,28 +160,36 @@ def run_grad(args, logger):
                     extra_batches.append(events_out[1])
                     layer_slices.append(events_out[0].size(0))
 
-                if not state_batches:
-                    continue
-
-                states = torch.cat(state_batches, dim=0)
-                extras = torch.cat(extra_batches, dim=0)
-
-                action, log_prob, _ = actor(states, extras)
-                value = critic(states, extras)
-
-                offset = 0
                 total_delta_in = torch.zeros_like(network.w_input_hidden)
                 total_delta_out = torch.zeros_like(network.w_hidden_output)
 
-                if events_in[0].numel() > 0:
-                    count_in = layer_slices[0]
-                    delta_in = _scatter_updates(0.01 * action[offset : offset + count_in], events_in[2], events_in[3], network.w_input_hidden)
-                    total_delta_in += delta_in
-                    offset += count_in
-                if events_out[0].numel() > 0:
-                    count_out = layer_slices[-1] if events_in[0].numel() == 0 else layer_slices[1]
-                    delta_out = _scatter_updates(0.01 * action[offset : offset + count_out], events_out[2], events_out[3], network.w_hidden_output)
-                    total_delta_out += delta_out
+                if state_batches:
+                    states = torch.cat(state_batches, dim=0)
+                    extras = torch.cat(extra_batches, dim=0)
+
+                    action, log_prob, _ = actor(states, extras)
+                    value = critic(states, extras)
+
+                    offset = 0
+                    if events_in[0].numel() > 0:
+                        count_in = layer_slices[0]
+                        delta_in = _scatter_updates(
+                            0.01 * action[offset : offset + count_in], events_in[2], events_in[3], network.w_input_hidden
+                        )
+                        total_delta_in += delta_in
+                        offset += count_in
+                    if events_out[0].numel() > 0:
+                        count_out = layer_slices[-1] if events_in[0].numel() == 0 else layer_slices[1]
+                        delta_out = _scatter_updates(
+                            0.01 * action[offset : offset + count_out], events_out[2], events_out[3], network.w_hidden_output
+                        )
+                        total_delta_out += delta_out
+                else:
+                    states = torch.empty(0, device=device)
+                    extras = torch.empty(0, device=device)
+                    value = torch.empty(0, device=device)
+                    log_prob = torch.empty(0, device=device)
+                    action = torch.empty(0, device=device)
 
                 teacher.load_state_dict(network.state_dict())
                 teacher.zero_grad()
@@ -199,21 +209,24 @@ def run_grad(args, logger):
                 epoch_reward.append(reward.item())
                 epoch_align.append(reward.item())
 
-                buffer = EpisodeBuffer()
-                for i in range(states.size(0)):
-                    buffer.append(states[i], action[i], log_prob[i], value[i])
-                buffer.finalize(reward)
+                if states.numel() > 0:
+                    episode_buffer = EpisodeBuffer()
+                    for i in range(states.size(0)):
+                        episode_buffer.append(states[i], extras[i], action[i], log_prob[i], value[i])
+                    episode_buffer.finalize(reward)
+                    batch_buffer.extend(episode_buffer)
+
+            if len(batch_buffer) > 0:
                 ppo_update(
                     actor,
                     critic,
-                    buffer,
+                    batch_buffer,
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(buffer)),
+                    batch_size=min(args.ppo_batch_size, len(batch_buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
-                    extra_features=extras,
                 )
 
         mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0

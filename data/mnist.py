@@ -1,19 +1,25 @@
 from typing import Tuple
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import datasets, transforms
 
 
-def get_mnist_dataloaders(batch_size_images: int, seed: int) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Return train, validation, and test dataloaders for MNIST.
+class _IndexedMNIST(datasets.MNIST):
+    """MNIST dataset that returns (image, label, index)."""
 
-    The training set is split into train/validation using a fixed seed for reproducibility.
-    """
+    def __getitem__(self, index):  # type: ignore[override]
+        image, label = super().__getitem__(index)
+        return image, label, index
+
+
+def get_mnist_dataloaders(batch_size_images: int, seed: int) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Return train, validation, and test dataloaders for MNIST with dataset indices."""
+
     transform = transforms.ToTensor()
 
-    train_val_dataset = datasets.MNIST(root="data", train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST(root="data", train=False, download=True, transform=transform)
+    train_val_dataset: Dataset = _IndexedMNIST(root="data", train=True, download=True, transform=transform)
+    test_dataset: Dataset = _IndexedMNIST(root="data", train=False, download=True, transform=transform)
 
     val_fraction = 0.1
     val_size = int(len(train_val_dataset) * val_fraction)

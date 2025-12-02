@@ -103,7 +103,7 @@ def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[flo
     network.eval()
     accuracies, margins, rewards = [], [], []
     with torch.no_grad():
-        for images, labels in loader:
+        for images, labels, _ in loader:
             images = images.to(device)
             labels = labels.to(device)
             spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
@@ -140,13 +140,15 @@ def run_semi(args, logger):
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_margin, epoch_reward = [], [], []
-        for images, labels in train_loader:
+        for images, labels, _ in train_loader:
             images = images.to(device)
             labels = labels.to(device)
             input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
             hidden_spikes, output_spikes, firing_rates = network(input_spikes)
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
+
+            batch_buffer = EpisodeBuffer()
 
             for b in range(input_spikes.size(0)):
                 state, extra, pre_idx, post_idx = _gather_events(
@@ -161,21 +163,23 @@ def run_semi(args, logger):
                 with torch.no_grad():
                     _scatter_updates(0.01 * action, pre_idx, post_idx, network.w_hidden_output)
 
-                buffer = EpisodeBuffer()
+                episode_buffer = EpisodeBuffer()
                 for i in range(state.size(0)):
-                    buffer.append(state[i], action[i], log_prob[i], value[i])
-                buffer.finalize(r_total[b])
+                    episode_buffer.append(state[i], extra[i], action[i], log_prob[i], value[i])
+                episode_buffer.finalize(r_total[b])
+                batch_buffer.extend(episode_buffer)
+
+            if len(batch_buffer) > 0:
                 ppo_update(
                     actor,
                     critic,
-                    buffer,
+                    batch_buffer,
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(buffer)),
+                    batch_size=min(args.ppo_batch_size, len(batch_buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
-                    extra_features=extra,
                 )
 
             preds = firing_rates.argmax(dim=1)

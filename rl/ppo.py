@@ -1,7 +1,6 @@
 from typing import Optional
 import torch
 from torch import nn
-from typing import Optional
 
 from rl.buffers import EpisodeBuffer
 
@@ -16,9 +15,8 @@ def ppo_update(
     batch_size: int,
     eps_clip: float = 0.2,
     c_v: float = 1.0,
-    extra_features: Optional[torch.Tensor] = None,
 ):
-    states, actions, log_probs_old, values_old, rewards = buffer.get_batch()
+    states, extras, actions, log_probs_old, values_old, rewards = buffer.get_batch()
     advantages = (rewards - values_old).detach()
     num_samples = states.size(0)
 
@@ -34,9 +32,9 @@ def ppo_update(
             advantages_mb = advantages[batch_idx]
             rewards_mb = rewards[batch_idx]
 
-            extra_mb = extra_features[batch_idx] if extra_features is not None else None
+            extras_mb = extras[batch_idx] if extras.numel() > 0 else None
 
-            _, log_probs_new, _ = actor(states_mb, extra_mb, actions=actions_mb)
+            _, log_probs_new, _ = actor(states_mb, extras_mb, actions=actions_mb)
             ratio = torch.exp(log_probs_new - log_probs_old_mb)
 
             unclipped = ratio * advantages_mb
@@ -47,7 +45,7 @@ def ppo_update(
             actor_loss.backward()
             optimizer_actor.step()
 
-            values_new = critic(states_mb, extra_mb)
+            values_new = critic(states_mb, extras_mb)
             value_loss = (rewards_mb - values_new).pow(2).mean() * c_v
 
             optimizer_critic.zero_grad()
