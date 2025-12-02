@@ -27,6 +27,11 @@
 
 에이전트는 작업 시 다음 제약을 반드시 지킨다.
 
+0. **기본 원칙**
+
+   * 리포지토리에 이미 존재하는 코드와 docs/explain.md 내용이 docs/Theory.md 및 이 AGENTS.md와 충돌할 경우, 항상 docs/Theory.md 및 AGENTS.md를 우선하고, 코드를 그에 맞게 리팩토링해야 한다.
+
+
 1. **설계 변경 금지**
 
    * `Theory.md` 의 개념, 손실함수, 보상 정의, PPO 구조 등을 바꾸지 않는다.
@@ -66,7 +71,10 @@
 ```text
 project_root/
   AGENTS.md           # 이 문서
-  Theory.md           # 설계 기준 문서 (수정 금지)
+
+  docs/
+    Theory.md           # 설계 기준 문서 (수정 금지)
+    explain.md       # 현재 구현/실험 설명용 문서들
 
   main.py             # 진입점, CLI 파싱, scenario 선택, 학습 루프 실행
 
