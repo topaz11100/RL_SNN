@@ -2,6 +2,7 @@ import os
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
@@ -18,15 +19,68 @@ def _ensure_metrics_file(path: str, header: str) -> None:
             f.write(header + "\n")
 
 
-def _prepare_state(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, L: int) -> torch.Tensor:
-    pre_hist = pre_spikes.mean(dim=1)
-    post_hist = post_spikes.mean(dim=1)
-    T = pre_hist.shape[1]
-    if L > T:
-        L = T
-    pre_seg = pre_hist[:, -L:]
-    post_seg = post_hist[:, -L:]
-    return torch.stack([pre_seg, post_seg], dim=1)
+def _gather_events(
+    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = pre_spikes.device
+    batch_size, n_pre, T = pre_spikes.shape
+    n_post = post_spikes.shape[1]
+    pad_pre = F.pad(pre_spikes, (L - 1, 0))
+    pad_post = F.pad(post_spikes, (L - 1, 0))
+    idx_range = torch.arange(L, device=device)
+
+    histories, extras, pre_indices, post_indices = [], [], [], []
+
+    def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
+        indices = (spike_tensor == 1).nonzero(as_tuple=False)
+        if indices.numel() == 0:
+            return
+        if is_pre_event:
+            batch_idx = indices[:, 0].repeat_interleave(n_post)
+            pre_idx = indices[:, 1].repeat_interleave(n_post)
+            post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
+            e_type = torch.tensor([1.0, 0.0], device=device)
+            repeat_count = n_post
+        else:
+            batch_idx = indices[:, 0].repeat_interleave(n_pre)
+            post_idx = indices[:, 1].repeat_interleave(n_pre)
+            pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
+            e_type = torch.tensor([0.0, 1.0], device=device)
+            repeat_count = n_pre
+        time_idx = indices[:, 2].repeat_interleave(repeat_count)
+        pos = time_idx + (L - 1)
+        time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
+        pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
+        post_hist = pad_post[batch_idx.unsqueeze(1), post_idx.unsqueeze(1), time_indices]
+        histories.append(torch.stack([pre_hist, post_hist], dim=1))
+        w_vals = weights[pre_idx, post_idx].unsqueeze(1)
+        extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
+        pre_indices.append(pre_idx)
+        post_indices.append(post_idx)
+
+    _append_events(pre_spikes, True)
+    _append_events(post_spikes, False)
+
+    if not histories:
+        return (
+            torch.empty(0, 2, L, device=device),
+            torch.empty(0, 3, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
+        )
+
+    return (
+        torch.cat(histories, dim=0),
+        torch.cat(extras, dim=0),
+        torch.cat(pre_indices, dim=0),
+        torch.cat(post_indices, dim=0),
+    )
+
+
+def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> None:
+    delta_matrix = torch.zeros_like(weights)
+    delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
+    weights.data.add_(delta_matrix)
 
 
 def _compute_reward_components(
@@ -34,7 +88,9 @@ def _compute_reward_components(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     preds = firing_rates.argmax(dim=1)
     correct = preds == labels
-    r_cls = torch.where(correct, torch.tensor(1.0, device=firing_rates.device), torch.tensor(-1.0, device=firing_rates.device))
+    r_cls = torch.where(
+        correct, torch.tensor(1.0, device=firing_rates.device), torch.tensor(-1.0, device=firing_rates.device)
+    )
     true_rates = firing_rates.gather(1, labels.view(-1, 1)).squeeze(1)
     max_other, _ = (firing_rates + torch.eye(firing_rates.size(1), device=firing_rates.device) * -1e9).max(dim=1)
     margin = true_rates - max_other
@@ -51,7 +107,7 @@ def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[flo
             images = images.to(device)
             labels = labels.to(device)
             spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
-            output_spikes, rates = network(spikes)
+            _, output_spikes, rates = network(spikes)
             r_cls, r_margin, r_total = _compute_reward_components(rates, labels, args.beta_margin)
             preds = rates.argmax(dim=1)
             accuracies.append((preds == labels).float().mean().item())
@@ -70,8 +126,8 @@ def run_semi(args, logger):
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
     network = SemiSupervisedNetwork().to(device)
-    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1)).to(device)
-    critic = ValueFunction().to(device)
+    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=3).to(device)
+    critic = ValueFunction(extra_feature_dim=3).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
@@ -88,27 +144,27 @@ def run_semi(args, logger):
             images = images.to(device)
             labels = labels.to(device)
             input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
-            output_spikes, firing_rates = network(input_spikes)
-
-            state = _prepare_state(input_spikes, output_spikes, args.spike_array_len)
-            action, log_prob, _ = actor(state)
-            value = critic(state).squeeze(-1)
+            hidden_spikes, output_spikes, firing_rates = network(input_spikes)
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
-            with torch.no_grad():
-                delta = 0.01 * action.mean()
-                network.w_hidden_output.data = network.w_hidden_output.data + delta
+            for b in range(input_spikes.size(0)):
+                state, extra, pre_idx, post_idx = _gather_events(
+                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len
+                )
+                if state.numel() == 0:
+                    continue
 
-            preds = firing_rates.argmax(dim=1)
-            epoch_acc.append((preds == labels).float().mean().item())
-            epoch_margin.append(r_margin.mean().item())
-            epoch_reward.append(r_total.mean().item())
+                action, log_prob, _ = actor(state, extra)
+                value = critic(state, extra)
 
-            for i in range(state.size(0)):
+                with torch.no_grad():
+                    _scatter_updates(0.01 * action, pre_idx, post_idx, network.w_hidden_output)
+
                 buffer = EpisodeBuffer()
-                buffer.append(state[i], action[i], log_prob[i], value[i])
-                buffer.finalize(r_total[i])
+                for i in range(state.size(0)):
+                    buffer.append(state[i], action[i], log_prob[i], value[i])
+                buffer.finalize(r_total[b])
                 ppo_update(
                     actor,
                     critic,
@@ -119,7 +175,13 @@ def run_semi(args, logger):
                     batch_size=min(args.ppo_batch_size, len(buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
+                    extra_features=extra,
                 )
+
+            preds = firing_rates.argmax(dim=1)
+            epoch_acc.append((preds == labels).float().mean().item())
+            epoch_margin.append(r_margin.mean().item())
+            epoch_reward.append(r_total.mean().item())
 
         mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0
         mean_margin = sum(epoch_margin) / len(epoch_margin) if epoch_margin else 0.0

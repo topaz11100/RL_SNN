@@ -25,13 +25,14 @@ class SemiSupervisedNetwork(nn.Module):
         self.w_input_hidden = nn.Parameter(torch.rand(n_input, n_hidden) * 0.1)
         self.w_hidden_output = nn.Parameter(torch.rand(n_hidden, n_output) * 0.1)
 
-    def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Simulate hidden and output LIF layers for encoded input.
 
         Args:
             input_spikes: Tensor of shape (batch, 784, T)
 
         Returns:
+            hidden_spikes: Tensor of shape (batch, n_hidden, T)
             output_spikes: Tensor of shape (batch, n_output, T)
             firing_rates: Tensor of shape (batch, n_output) averaged over time
         """
@@ -65,4 +66,4 @@ class SemiSupervisedNetwork(nn.Module):
             s_output_prev = s_output
 
         firing_rates = output_spikes.mean(dim=2)
-        return output_spikes, firing_rates
+        return hidden_spikes, output_spikes, firing_rates
