@@ -176,7 +176,16 @@ project_root/
    * 구조: d → 32 (ReLU) → 32 (ReLU) → 1 (Tanh)
    * 출력 Tanh 를 평균 m ∈ [-1,1] 로 사용하고, 시나리오/정책별 `σ_policy` 를 곱해 Gaussian 정책을 만든다.
    * 액션 샘플: `Δd_i(t) ~ N(m_i(t), σ_policy^2)`
-   * 가중치 업데이트: `Δw_i(t) = η_w * s_scen * Δd_i(t)` 후, 흥분/억제별 범위로 클리핑.
+   * **가중치 업데이트 및 클리핑:**
+
+     * 액션 출력 `Δd_i(t)` 에 대해 시나리오별 내부 스케일 `s_scen` 과 로컬 학습률 `η_w` 를 곱해
+       `Δw_i(t) = η_w * s_scen * Δd_i(t)` 를 만든다.
+     * 그런 다음 시냅스 종류(흥분/억제)에 따라 **사전에 정의된 범위로 in-place 클리핑** 한다.
+
+       * 흥분성 시냅스: `w_exc ∈ [exc_clip_min, exc_clip_max]`
+       * 억제성 시냅스: `w_inh ∈ [inh_clip_min, inh_clip_max]`
+     * `exc_clip_min`, `exc_clip_max`, `inh_clip_min`, `inh_clip_max` 는 CLI 인수로 전달되는 하이퍼파라미터이며,
+       실제 구현에서는 `torch.clamp_` 와 같은 in-place 연산을 사용해 **가중치 업데이트 직후 매 스텝마다** 적용해야 한다.
 
 3. **Critic MLP head**
 
@@ -254,7 +263,9 @@ project_root/
 
    * Diehl–Cook 스타일 E/I 네트워크를 `network_diehl_cook.py` 에 구현한다.
    * Input(784) → Excitatory(E, `--N-E`) → Inhibitory(I, `--N-E`) 구조.
-   * E→I 는 1:1 고정 회로, I→E 는 전결합 억제 시냅스.
+   * E→I 는 **학습되지 않는 1:1 고정 회로**이며, I→E 는 전결합 억제 시냅스이다.
+   * 이때 E→I 연결에는 학습 가능한 가중치 행렬(`nn.Parameter`)을 두지 않고,
+     j번째 흥분 뉴런의 스파이크가 항상 j번째 억제 뉴런으로 동일한 강도의 고정 입력을 전달하는 회로로 구현해야 한다.
 
 2. **가중치 정책 배치**
 
@@ -397,6 +408,19 @@ project_root/
      * `log.txt`: 하이퍼파라미터와 주요 지표를 사람이 읽을 수 있는 텍스트로 기록.
      * `metrics_train.txt`, `metrics_val.txt`, `metrics_test.txt`: 에포크/에피소드별 정확도·보상·마진 등의 숫자 로그.
      * 필요한 경우, Δt–Δd 산점도, 히스토그램 등을 이미지 파일로 저장.
+
+5. **가중치 클리핑 및 로컬 학습률 관련 CLI**
+
+   * `--exc-clip-min`, `--exc-clip-max`
+     흥분성 시냅스 가중치의 최소/최대값. Actor 업데이트 이후 `w_exc` 에 대해
+     `torch.clamp_(w_exc, exc_clip_min, exc_clip_max)` 와 같이 in-place 로 항상 적용한다.
+   * `--inh-clip-min`, `--inh-clip-max`
+     억제성 시냅스 가중치의 최소/최대값. 마찬가지로 업데이트 이후 `w_inh` 에 대해 in-place 클리핑을 수행한다.
+   * `--local-lr` (또는 시나리오별로 `--local-lr-unsup1`, `--local-lr-unsup2` 등)
+     로컬 학습률 `η_w` 를 제어하는 인수. 모든 시나리오에서
+     `Δw_i(t) = η_w * s_scen * Δd_i(t)` 의 형태가 되도록 하드코딩된 상수 대신 CLI 값에서 읽어 사용한다.
+   * 구현에서는 **모든 시나리오에서 동일한 규칙**으로 위 인수들을 사용해야 하며,
+     weight update 직후 흥분/억제 시냅스를 각각 지정된 범위로 클리핑하는 것을 빠뜨리면 안 된다.
 
 ## 8. 에이전트 응답 스타일 (Codex용)
 
