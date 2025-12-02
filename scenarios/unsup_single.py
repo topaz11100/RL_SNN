@@ -19,20 +19,11 @@ def _ensure_metrics_file(path: str) -> None:
             f.write("epoch\tR_sparse\tR_div\tR_stab\tR_total\n")
 
 
-def _compute_rewards(
-    exc_spikes: torch.Tensor,
-    rho_target: float,
-    alpha_sparse: float,
-    alpha_div: float,
-    alpha_stab: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _compute_reward_components(exc_spikes: torch.Tensor, rho_target: float) -> Tuple[torch.Tensor, torch.Tensor]:
     firing_rates = exc_spikes.mean(dim=2)
     r_sparse = -(firing_rates.mean(dim=1) - rho_target).abs()
     r_div = firing_rates.std(dim=1)
-    temporal_diff = exc_spikes[:, :, 1:] - exc_spikes[:, :, :-1]
-    r_stab = -temporal_diff.abs().mean(dim=(1, 2))
-    total = alpha_sparse * r_sparse + alpha_div * r_div + alpha_stab * r_stab
-    return r_sparse, r_div, r_stab, total
+    return r_sparse, r_div
 
 
 def _gather_events(
@@ -107,6 +98,9 @@ def run_unsup1(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, _, _ = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
+    base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
+    prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
+
     network = DiehlCookNetwork().to(device)
     actor = GaussianPolicy(sigma=args.sigma_unsup1, extra_feature_dim=3).to(device)
     critic = ValueFunction(extra_feature_dim=3).to(device)
@@ -118,20 +112,37 @@ def run_unsup1(args, logger):
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
-        for images, _ in train_loader:
+        for images, _, indices in train_loader:
             images = images.to(device)
+            indices = indices.to(device)
             input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate).to(device)
             exc_spikes, _ = network(input_spikes)
 
-            r_sparse, r_div, r_stab, r_total = _compute_rewards(
-                exc_spikes, args.rho_target, args.alpha_sparse, args.alpha_div, args.alpha_stab
-            )
+            r_sparse, r_div = _compute_reward_components(exc_spikes, args.rho_target)
+
+            batch_buffer = EpisodeBuffer()
+
+            firing_rates = exc_spikes.mean(dim=2)
+            winners = firing_rates.argmax(dim=1)
 
             for b in range(input_spikes.size(0)):
+                prev = prev_winners[indices[b]].item()
+                r_stab_value = 0.0 if prev < 0 else (1.0 if winners[b].item() == prev else -1.0)
+                prev_winners[indices[b]] = winners[b]
+
                 state, extra, pre_idx, post_idx = _gather_events(
                     input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
                 )
                 if state.numel() == 0:
+                    epoch_sparse.append(r_sparse[b].item())
+                    epoch_div.append(r_div[b].item())
+                    epoch_stab.append(r_stab_value)
+                    total_reward = (
+                        args.alpha_sparse * r_sparse[b]
+                        + args.alpha_div * r_div[b]
+                        + args.alpha_stab * torch.tensor(r_stab_value, device=device)
+                    )
+                    epoch_total.append(total_reward.item())
                     continue
 
                 action, log_prob, _ = actor(state, extra)
@@ -140,29 +151,34 @@ def run_unsup1(args, logger):
                 with torch.no_grad():
                     _scatter_updates(0.01 * action, pre_idx, post_idx, network.w_input_exc)
 
-                buffer = EpisodeBuffer()
+                episode_buffer = EpisodeBuffer()
                 for i in range(state.size(0)):
-                    buffer.append(state[i], action[i], log_prob[i], value[i])
-                buffer.finalize(r_total[b])
+                    episode_buffer.append(state[i], extra[i], action[i], log_prob[i], value[i])
+                total_reward = (
+                    args.alpha_sparse * r_sparse[b]
+                    + args.alpha_div * r_div[b]
+                    + args.alpha_stab * torch.tensor(r_stab_value, device=device)
+                )
+                episode_buffer.finalize(total_reward)
+                batch_buffer.extend(episode_buffer)
+
+                epoch_sparse.append(r_sparse[b].item())
+                epoch_div.append(r_div[b].item())
+                epoch_stab.append(r_stab_value)
+                epoch_total.append(total_reward.item())
+
+            if len(batch_buffer) > 0:
                 ppo_update(
                     actor,
                     critic,
-                    buffer,
+                    batch_buffer,
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(buffer)),
+                    batch_size=min(args.ppo_batch_size, len(batch_buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
-                    extra_features=extra,
                 )
-
-            epoch_sparse.append(r_sparse.mean().item())
-            epoch_div.append(r_div.mean().item())
-            epoch_stab.append(r_stab.mean().item())
-            epoch_total.append(r_total.mean().item())
-
-            break
 
         mean_sparse = sum(epoch_sparse) / len(epoch_sparse)
         mean_div = sum(epoch_div) / len(epoch_div)

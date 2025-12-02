@@ -19,20 +19,11 @@ def _ensure_metrics_file(path: str) -> None:
             f.write("epoch\tR_sparse\tR_div\tR_stab\tR_total\n")
 
 
-def _compute_rewards(
-    exc_spikes: torch.Tensor,
-    rho_target: float,
-    alpha_sparse: float,
-    alpha_div: float,
-    alpha_stab: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _compute_reward_components(exc_spikes: torch.Tensor, rho_target: float) -> Tuple[torch.Tensor, torch.Tensor]:
     firing_rates = exc_spikes.mean(dim=2)
     r_sparse = -(firing_rates.mean(dim=1) - rho_target).abs()
     r_div = firing_rates.std(dim=1)
-    temporal_diff = exc_spikes[:, :, 1:] - exc_spikes[:, :, :-1]
-    r_stab = -temporal_diff.abs().mean(dim=(1, 2))
-    total = alpha_sparse * r_sparse + alpha_div * r_div + alpha_stab * r_stab
-    return r_sparse, r_div, r_stab, total
+    return r_sparse, r_div
 
 
 def _gather_events(
@@ -106,6 +97,9 @@ def run_unsup2(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, _, _ = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
+    base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
+    prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
+
     network = DiehlCookNetwork().to(device)
 
     actor_exc = GaussianPolicy(sigma=args.sigma_unsup2, extra_feature_dim=3).to(device)
@@ -123,16 +117,31 @@ def run_unsup2(args, logger):
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
-        for images, _ in train_loader:
+        for images, _, indices in train_loader:
             images = images.to(device)
+            indices = indices.to(device)
             input_spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate).to(device)
             exc_spikes, inh_spikes = network(input_spikes)
 
-            r_sparse, r_div, r_stab, r_total = _compute_rewards(
-                exc_spikes, args.rho_target, args.alpha_sparse, args.alpha_div, args.alpha_stab
-            )
+            r_sparse, r_div = _compute_reward_components(exc_spikes, args.rho_target)
+
+            batch_buffer_exc = EpisodeBuffer()
+            batch_buffer_inh = EpisodeBuffer()
+
+            firing_rates = exc_spikes.mean(dim=2)
+            winners = firing_rates.argmax(dim=1)
 
             for b in range(input_spikes.size(0)):
+                prev = prev_winners[indices[b]].item()
+                r_stab_value = 0.0 if prev < 0 else (1.0 if winners[b].item() == prev else -1.0)
+                prev_winners[indices[b]] = winners[b]
+
+                total_reward = (
+                    args.alpha_sparse * r_sparse[b]
+                    + args.alpha_div * r_div[b]
+                    + args.alpha_stab * torch.tensor(r_stab_value, device=device)
+                )
+
                 state_exc, extra_exc, pre_exc, post_exc = _gather_events(
                     input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
                 )
@@ -144,20 +153,9 @@ def run_unsup2(args, logger):
 
                     buffer_exc = EpisodeBuffer()
                     for i in range(state_exc.size(0)):
-                        buffer_exc.append(state_exc[i], action_exc[i], logp_exc[i], value_exc[i])
-                    buffer_exc.finalize(r_total[b])
-                    ppo_update(
-                        actor_exc,
-                        critic_exc,
-                        buffer_exc,
-                        optimizer_actor_exc,
-                        optimizer_critic_exc,
-                        ppo_epochs=args.ppo_epochs,
-                        batch_size=min(args.ppo_batch_size, len(buffer_exc)),
-                        eps_clip=args.ppo_eps,
-                        c_v=1.0,
-                        extra_features=extra_exc,
-                    )
+                        buffer_exc.append(state_exc[i], extra_exc[i], action_exc[i], logp_exc[i], value_exc[i])
+                    buffer_exc.finalize(total_reward)
+                    batch_buffer_exc.extend(buffer_exc)
 
                 state_inh, extra_inh, pre_inh, post_inh = _gather_events(
                     inh_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_inh_exc, args.spike_array_len
@@ -170,27 +168,40 @@ def run_unsup2(args, logger):
 
                     buffer_inh = EpisodeBuffer()
                     for i in range(state_inh.size(0)):
-                        buffer_inh.append(state_inh[i], action_inh[i], logp_inh[i], value_inh[i])
-                    buffer_inh.finalize(r_total[b])
-                    ppo_update(
-                        actor_inh,
-                        critic_inh,
-                        buffer_inh,
-                        optimizer_actor_inh,
-                        optimizer_critic_inh,
-                        ppo_epochs=args.ppo_epochs,
-                        batch_size=min(args.ppo_batch_size, len(buffer_inh)),
-                        eps_clip=args.ppo_eps,
-                        c_v=1.0,
-                        extra_features=extra_inh,
-                    )
+                        buffer_inh.append(state_inh[i], extra_inh[i], action_inh[i], logp_inh[i], value_inh[i])
+                    buffer_inh.finalize(total_reward)
+                    batch_buffer_inh.extend(buffer_inh)
 
-            epoch_sparse.append(r_sparse.mean().item())
-            epoch_div.append(r_div.mean().item())
-            epoch_stab.append(r_stab.mean().item())
-            epoch_total.append(r_total.mean().item())
+                epoch_sparse.append(r_sparse[b].item())
+                epoch_div.append(r_div[b].item())
+                epoch_stab.append(r_stab_value)
+                epoch_total.append(total_reward.item())
 
-            break
+            if len(batch_buffer_exc) > 0:
+                ppo_update(
+                    actor_exc,
+                    critic_exc,
+                    batch_buffer_exc,
+                    optimizer_actor_exc,
+                    optimizer_critic_exc,
+                    ppo_epochs=args.ppo_epochs,
+                    batch_size=min(args.ppo_batch_size, len(batch_buffer_exc)),
+                    eps_clip=args.ppo_eps,
+                    c_v=1.0,
+                )
+
+            if len(batch_buffer_inh) > 0:
+                ppo_update(
+                    actor_inh,
+                    critic_inh,
+                    batch_buffer_inh,
+                    optimizer_actor_inh,
+                    optimizer_critic_inh,
+                    ppo_epochs=args.ppo_epochs,
+                    batch_size=min(args.ppo_batch_size, len(batch_buffer_inh)),
+                    eps_clip=args.ppo_eps,
+                    c_v=1.0,
+                )
 
         mean_sparse = sum(epoch_sparse) / len(epoch_sparse)
         mean_div = sum(epoch_div) / len(epoch_div)
