@@ -13,9 +13,10 @@ def main():
     args = parse_args()
     set_global_seed(args.seed)
 
-    result_dir = create_result_dir(args.scenario)
+    result_dir = create_result_dir(args.scenario, args.run_name)
     args.result_dir = result_dir
     logger = get_logger(result_dir)
+    logger.info("Args: %s", vars(args))
 
     scenario_runners: Dict[str, Callable] = {
         "unsup1": run_unsup1,

@@ -16,6 +16,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="Mini-batch size in number of images",
     )
+    parser.add_argument("--run-name", type=str, default=None, help="Name for the current run / result directory")
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=1,
+        help="Logging interval in epochs/episodes for console/file logs",
+    )
     parser.add_argument(
         "--num-epochs",
         type=int,
@@ -31,6 +38,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sigma-unsup2", type=float, default=0.1, help="Gaussian sigma for unsup2 policies")
     parser.add_argument("--sigma-semi", type=float, default=0.1, help="Gaussian sigma for semi-supervised policy")
     parser.add_argument("--sigma-sup", type=float, default=0.1, help="Gaussian sigma for gradient mimicry policy")
+    parser.add_argument("--N-E", type=int, default=100, help="Number of excitatory neurons in Diehl–Cook network")
+    parser.add_argument("--N-hidden", type=int, default=256, help="Hidden layer size for semi-supervised network")
+    parser.add_argument("--dt", type=float, default=1.0, help="Simulation time step Δt for LIF dynamics")
+    parser.add_argument(
+        "--layer-index-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor applied to normalized layer indices in grad mimicry scenario",
+    )
     parser.add_argument("--lr-actor", type=float, default=1e-3, help="Learning rate for actor")
     parser.add_argument("--lr-critic", type=float, default=1e-3, help="Learning rate for critic")
     parser.add_argument("--ppo-eps", type=float, default=0.2, help="PPO clipping epsilon")
@@ -73,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta-margin", type=float, default=0.5, help="Weight for margin reward")
     parser.add_argument("--alpha-align", type=float, default=0.1, help="Alignment step size for gradient mimicry")
     parser.add_argument("--max-rate", type=float, default=1.0, help="Maximal firing rate for Poisson encoder")
+    parser.add_argument(
+        "--log-gradient-stats",
+        action="store_true",
+        help="Enable extended logging of gradient/Δw statistics in grad mimicry scenario",
+    )
     return parser
 
 
