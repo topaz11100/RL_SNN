@@ -12,7 +12,7 @@ class DiehlCookNetwork(nn.Module):
         n_input: int = 784,
         n_exc: int = 100,
         n_inh: int = 100,
-        weight_ei: float = 1.0,
+        weight_ei: float = 50.0,
         exc_params: Optional[LIFParams] = None,
         inh_params: Optional[LIFParams] = None,
     ):
@@ -27,6 +27,11 @@ class DiehlCookNetwork(nn.Module):
 
         self.w_input_exc = nn.Parameter(torch.rand(n_input, n_exc) * 0.1)
         self.w_inh_exc = nn.Parameter(torch.rand(n_inh, n_exc) * 0.1)
+        inh_exc_mask = torch.ones(n_inh, n_exc)
+        inh_exc_mask = inh_exc_mask - torch.eye(n_inh)
+        self.register_buffer("inh_exc_mask", inh_exc_mask)
+        with torch.no_grad():
+            self.w_inh_exc.mul_(self.inh_exc_mask)
 
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
         """Simulate the E/I network for given input spike trains.
@@ -55,7 +60,8 @@ class DiehlCookNetwork(nn.Module):
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
-            I_exc = torch.matmul(x_t, torch.relu(self.w_input_exc)) - torch.matmul(s_inh_prev, torch.relu(self.w_inh_exc))
+            w_inh_exc = torch.relu(self.w_inh_exc) * self.inh_exc_mask
+            I_exc = torch.matmul(x_t, torch.relu(self.w_input_exc)) - torch.matmul(s_inh_prev, w_inh_exc)
             v_exc, s_exc = lif_step(v_exc, I_exc, self.exc_params)
 
             I_inh = self.weight_ei * s_exc_prev
