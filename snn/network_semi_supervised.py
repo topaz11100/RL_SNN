@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFParams, lif_step
+from snn.lif import LIFCell, LIFParams
 
 
 class SemiSupervisedNetwork(nn.Module):
@@ -24,6 +24,9 @@ class SemiSupervisedNetwork(nn.Module):
 
         self.w_input_hidden = nn.Parameter(torch.rand(n_input, n_hidden) * 0.1)
         self.w_hidden_output = nn.Parameter(torch.rand(n_hidden, n_output) * 0.1)
+
+        self.hidden_cell = LIFCell(self.hidden_params, surrogate=False)
+        self.output_cell = LIFCell(self.output_params, surrogate=False)
 
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Simulate hidden and output LIF layers for encoded input.
@@ -54,10 +57,10 @@ class SemiSupervisedNetwork(nn.Module):
         for t in range(T):
             x_t = input_spikes[:, :, t]
             I_hidden = torch.matmul(x_t, torch.relu(self.w_input_hidden))
-            v_hidden, s_hidden = lif_step(v_hidden, I_hidden, self.hidden_params)
+            v_hidden, s_hidden = self.hidden_cell(v_hidden, I_hidden)
 
             I_output = torch.matmul(s_hidden_prev, torch.relu(self.w_hidden_output))
-            v_output, s_output = lif_step(v_output, I_output, self.output_params)
+            v_output, s_output = self.output_cell(v_output, I_output)
 
             hidden_spikes[:, :, t] = s_hidden
             output_spikes[:, :, t] = s_output
