@@ -165,11 +165,15 @@ def run_semi(args, logger):
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_margin, epoch_reward = [], [], []
-        for images, labels, _ in train_loader:
+        for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device)
             labels = labels.to(device)
             input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
             hidden_spikes, output_spikes, firing_rates = network(input_spikes)
+
+            preds = firing_rates.argmax(dim=1)
+            batch_acc = (preds == labels).float().mean().item()
+            epoch_acc.append(batch_acc)
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
@@ -241,10 +245,18 @@ def run_semi(args, logger):
                     c_v=1.0,
                 )
 
-            preds = firing_rates.argmax(dim=1)
-            epoch_acc.append((preds == labels).float().mean().item())
             epoch_margin.append(r_margin.mean().item())
             epoch_reward.append(r_total.mean().item())
+
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                logger.info(
+                    "Epoch %d/%d | Batch %d/%d | Train acc %.4f",
+                    epoch,
+                    args.num_epochs,
+                    batch_idx,
+                    len(train_loader),
+                    batch_acc,
+                )
 
         mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0
         mean_margin = sum(epoch_margin) / len(epoch_margin) if epoch_margin else 0.0
