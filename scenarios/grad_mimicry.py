@@ -98,7 +98,9 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
             preds = firing_rates.argmax(dim=1)
             accuracies.append((preds == labels).float().mean().item())
             true_rates = firing_rates.gather(1, labels.view(-1, 1)).squeeze(1)
-            max_other, _ = (firing_rates + torch.eye(firing_rates.size(1), device=firing_rates.device) * -1e9).max(dim=1)
+            masked_rates = firing_rates.clone()
+            masked_rates.scatter_(1, labels.view(-1, 1), -1e9)
+            max_other, _ = masked_rates.max(dim=1)
             margin = true_rates - max_other
             rewards.append(margin.mean().item())
     network.train()

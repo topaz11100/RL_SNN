@@ -23,7 +23,7 @@ def _ensure_metrics_file(path: str, header: str) -> None:
 
 
 def _gather_events(
-    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int, l_norm: float
+    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
@@ -57,8 +57,7 @@ def _gather_events(
         post_hist = pad_post[batch_idx.unsqueeze(1), post_idx.unsqueeze(1), time_indices]
         histories.append(torch.stack([pre_hist, post_hist], dim=1))
         w_vals = weights[pre_idx, post_idx].unsqueeze(1)
-        l_tensor = torch.full_like(w_vals, l_norm)
-        extras.append(torch.cat([w_vals, l_tensor, e_type.expand(w_vals.size(0), -1)], dim=1))
+        extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
 
@@ -68,7 +67,7 @@ def _gather_events(
     if not histories:
         return (
             torch.empty(0, 2, L, device=device),
-            torch.empty(0, 4, device=device),
+            torch.empty(0, 3, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
         )
@@ -96,7 +95,9 @@ def _compute_reward_components(
         correct, torch.tensor(1.0, device=firing_rates.device), torch.tensor(-1.0, device=firing_rates.device)
     )
     true_rates = firing_rates.gather(1, labels.view(-1, 1)).squeeze(1)
-    max_other, _ = (firing_rates + torch.eye(firing_rates.size(1), device=firing_rates.device) * -1e9).max(dim=1)
+    masked_rates = firing_rates.clone()
+    masked_rates.scatter_(1, labels.view(-1, 1), -1e9)
+    max_other, _ = masked_rates.max(dim=1)
     margin = true_rates - max_other
     r_margin = beta_margin * margin
     total = r_cls + r_margin
@@ -143,8 +144,8 @@ def run_semi(args, logger):
     network = SemiSupervisedNetwork(
         n_hidden=args.N_hidden, hidden_params=lif_params, output_params=lif_params
     ).to(device)
-    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=4).to(device)
-    critic = ValueFunction(extra_feature_dim=4).to(device)
+    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=3).to(device)
+    critic = ValueFunction(extra_feature_dim=3).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
@@ -176,10 +177,10 @@ def run_semi(args, logger):
 
             for b in range(input_spikes.size(0)):
                 events_in = _gather_events(
-                    input_spikes[b : b + 1], hidden_spikes[b : b + 1], network.w_input_hidden, args.spike_array_len, 0.0
+                    input_spikes[b : b + 1], hidden_spikes[b : b + 1], network.w_input_hidden, args.spike_array_len
                 )
                 events_out = _gather_events(
-                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len, 1.0
+                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len
                 )
 
                 state_batches = []
