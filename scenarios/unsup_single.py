@@ -4,7 +4,7 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
-from analysis_utils import compute_neuron_labels, evaluate_labeling
+from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
 from rl.policy import GaussianPolicy
@@ -118,6 +118,16 @@ def _collect_firing_rates(network: DiehlCookNetwork, loader, device, args):
     return torch.cat(rates, dim=0), torch.cat(labels, dim=0)
 
 
+def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
+    if states.numel() == 0:
+        return torch.empty(0, device=states.device)
+    L = states.size(2)
+    time_idx = torch.arange(L, device=states.device)
+    last_pre = torch.where(states[:, 0, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    last_post = torch.where(states[:, 1, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    return last_pre - last_post
+
+
 def run_unsup1(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
@@ -134,6 +144,9 @@ def run_unsup1(args, logger):
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
+    w_input_exc_before = network.w_input_exc.detach().cpu().clone()
+    w_inh_exc_before = network.w_inh_exc.detach().cpu().clone()
+
     metrics_path = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
     metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
@@ -142,6 +155,8 @@ def run_unsup1(args, logger):
     _ensure_eval_file(metrics_test)
 
     s_scen = 1.0
+    delta_t_values = []
+    delta_d_values = []
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
         for images, _, indices in train_loader:
@@ -185,11 +200,11 @@ def run_unsup1(args, logger):
                 if state_exc.numel() > 0:
                     states.append(state_exc)
                     extras.append(extra_exc)
-                    slices.append(("exc", state_exc.size(0)))
+                    slices.append(("exc", (state_exc, extra_exc, pre_exc, post_exc)))
                 if state_inh.numel() > 0:
                     states.append(state_inh)
                     extras.append(extra_inh)
-                    slices.append(("inh", state_inh.size(0)))
+                    slices.append(("inh", (state_inh, extra_inh, pre_inh, post_inh)))
 
                 if states:
                     states_cat = torch.cat(states, dim=0)
@@ -201,18 +216,21 @@ def run_unsup1(args, logger):
                     offset = 0
                     episode_buffer = EpisodeBuffer()
 
-                    for name, count in slices:
+                    for name, events in slices:
+                        count = events[0].size(0)
                         idx_slice = slice(offset, offset + count)
                         if name == "exc":
                             _scatter_updates(
-                                args.local_lr * s_scen * action[idx_slice], pre_exc, post_exc, network.w_input_exc
+                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_input_exc
                             )
                             torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
                         else:
                             _scatter_updates(
-                                args.local_lr * s_scen * action[idx_slice], pre_inh, post_inh, network.w_inh_exc
+                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_inh_exc
                             )
                             torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
+                        delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
+                        delta_d_values.append(action[idx_slice].detach().cpu())
                         offset += count
 
                     for i in range(states_cat.size(0)):
@@ -272,3 +290,15 @@ def run_unsup1(args, logger):
                 val_acc,
                 test_acc,
             )
+
+    delta_t_concat = torch.cat(delta_t_values, dim=0) if delta_t_values else torch.empty(0)
+    delta_d_concat = torch.cat(delta_d_values, dim=0) if delta_d_values else torch.empty(0)
+    if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
+        plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+
+    plot_weight_histograms(
+        w_input_exc_before, network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "hist_input_exc.png")
+    )
+    plot_weight_histograms(
+        w_inh_exc_before, network.w_inh_exc.detach().cpu(), os.path.join(args.result_dir, "hist_inh_exc.png")
+    )
