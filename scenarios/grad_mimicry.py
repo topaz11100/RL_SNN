@@ -157,7 +157,7 @@ def run_grad(args, logger):
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_reward, epoch_align = [], [], []
-        for images, labels, _ in train_loader:
+        for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device)
             labels = labels.to(device)
             input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate).to(device)
@@ -165,7 +165,8 @@ def run_grad(args, logger):
             hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
 
             preds = firing_rates.argmax(dim=1)
-            epoch_acc.append((preds == labels).float().mean().item())
+            batch_acc = (preds == labels).float().mean().item()
+            epoch_acc.append(batch_acc)
 
             batch_buffer = EpisodeBuffer()
 
@@ -274,6 +275,16 @@ def run_grad(args, logger):
                     batch_size=min(args.ppo_batch_size, len(batch_buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
+                )
+
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                logger.info(
+                    "Epoch %d/%d | Batch %d/%d | Train acc %.4f",
+                    epoch,
+                    args.num_epochs,
+                    batch_idx,
+                    len(train_loader),
+                    batch_acc,
                 )
 
         mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0

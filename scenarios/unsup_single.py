@@ -176,7 +176,7 @@ def run_unsup1(args, logger):
     delta_d_values = []
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
-        for images, _, indices in train_loader:
+        for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
             images = images.to(device)
             indices = indices.to(device)
             input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate).to(device)
@@ -281,6 +281,15 @@ def run_unsup1(args, logger):
                     batch_size=min(args.ppo_batch_size, len(batch_buffer)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
+                )
+
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                logger.info(
+                    "Epoch %d/%d | Batch %d/%d",
+                    epoch,
+                    args.num_epochs,
+                    batch_idx,
+                    len(train_loader),
                 )
 
         mean_sparse = sum(epoch_sparse) / len(epoch_sparse)
