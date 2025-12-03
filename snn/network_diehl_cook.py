@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFParams, lif_step
+from snn.lif import LIFCell, LIFParams
 
 
 class DiehlCookNetwork(nn.Module):
@@ -32,6 +32,9 @@ class DiehlCookNetwork(nn.Module):
         self.register_buffer("inh_exc_mask", inh_exc_mask)
         with torch.no_grad():
             self.w_inh_exc.mul_(self.inh_exc_mask)
+
+        self.exc_cell = LIFCell(self.exc_params, surrogate=False)
+        self.inh_cell = LIFCell(self.inh_params, surrogate=False)
 
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
         """Simulate the E/I network for given input spike trains.
@@ -62,10 +65,10 @@ class DiehlCookNetwork(nn.Module):
             x_t = input_spikes[:, :, t]
             w_inh_exc = torch.relu(self.w_inh_exc) * self.inh_exc_mask
             I_exc = torch.matmul(x_t, torch.relu(self.w_input_exc)) - torch.matmul(s_inh_prev, w_inh_exc)
-            v_exc, s_exc = lif_step(v_exc, I_exc, self.exc_params)
+            v_exc, s_exc = self.exc_cell(v_exc, I_exc)
 
             I_inh = self.weight_ei * s_exc_prev
-            v_inh, s_inh = lif_step(v_inh, I_inh, self.inh_params)
+            v_inh, s_inh = self.inh_cell(v_inh, I_inh)
 
             exc_spikes[:, :, t] = s_exc
             inh_spikes[:, :, t] = s_inh

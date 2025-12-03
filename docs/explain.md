@@ -46,9 +46,14 @@
   - **필드**: `tau`, `v_th`, `v_reset`, `v_rest`, `dt`, `R`.
   - **역할**: `Theory.md`의 LIF 미분방정식 파라미터 묶음 데이터클래스.
   - **Theory 연계**: 막전위 업데이트 식 `v[t+1] = v[t] + (-(v[t]-v_rest)+R*I_syn)*dt/tau`를 정의하는 상수.
+- `lif_dynamics(v: Tensor, I: Tensor, params: LIFParams, surrogate: bool = False, slope: float = 5.0) -> Tuple[Tensor, Tensor]`
+  - **인수**: 현재 막전위 `v`, 시냅스 전류 `I`, 파라미터 `params`, surrogate 사용 여부와 시그모이드 기울기 `slope`.
+  - **역할**: `Theory.md` 2.2절 수식에 따라 막전위를 적분하고, 업데이트된 막전위 기준으로 hard/surrogate 스파이크를 생성한 뒤 detach 기반 리셋을 적용한다.
+  - **출력**: `(v_next, spikes)`.
+  - **Theory 연계**: 공통 LIF 동역학 구현부로 모든 네트워크가 공유하는 단일 소스.
 - `lif_step(v: Tensor, I_syn: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]`
   - **인수**: 현재 막전위 `v`, 시냅스 전류 `I_syn`, 파라미터 `params`.
-  - **역할**: 한 타임스텝 동안 막전위 적분 후 임계치 초과 시 스파이크 생성 및 리셋.
+  - **역할**: hard Heaviside 스파이크를 사용하는 한 타임스텝 LIF 업데이트 래퍼. 내부적으로 `lif_dynamics(..., surrogate=False)`를 호출한다.
   - **출력**: `(v_next, spikes)`.
   - **Theory 연계**: `Theory.md` 2.2절의 LIF 업데이트와 발화/리셋 규칙 구현.
 - `lif_forward(I: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]`
@@ -56,6 +61,9 @@
   - **역할**: 타임스텝 반복으로 벡터화된 막전위/스파이크 시퀀스를 시뮬레이션.
   - **출력**: `(V, S)` 막전위와 스파이크열.
   - **Theory 연계**: LIF 셀을 시간 전개하여 시나리오별 네트워크 동역학을 재현.
+- `LIFCell.__init__(params: LIFParams, surrogate: bool = False, slope: float = 5.0)` / `forward(v: Tensor, I: Tensor) -> Tuple[Tensor, Tensor]`
+  - **역할**: 학습 파라미터 없이 한 스텝 LIF 동역학을 수행하는 모듈. surrogate=True 시 시그모이드 근사 스파이크를 사용하며 reset에서는 gradient가 끊기도록 `lif_dynamics`를 호출한다.
+  - **Theory 연계**: `Theory.md` 2.2절 LIF 셀을 모듈화해 모든 네트워크에서 동일한 동역학을 적용.
 
 ### snn/encoding.py
 - `poisson_encode(images: Tensor, T: int, max_rate: float = 1.0) -> Tensor`
@@ -78,23 +86,20 @@
 - `SemiSupervisedNetwork.__init__(n_input: int = 784, n_hidden: int = 256, n_output: int = 10, hidden_params: Optional[LIFParams] = None, output_params: Optional[LIFParams] = None)`
   - **역할**: 입력→은닉→출력 LIF 계층과 가중치 초기화.
   - **Theory 연계**: 시나리오 2 분류용 SNN 구조.
-- `forward(input_spikes: Tensor) -> Tuple[Tensor, Tensor]`
+- `forward(input_spikes: Tensor) -> Tuple[Tensor, Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: 은닉/출력 LIF를 시간 전개하여 출력 스파이크와 평균 발화율 산출.
-  - **출력**: `(output_spikes, firing_rates)`.
+  - **역할**: 은닉/출력 LIF를 시간 전개하여 은닉/출력 스파이크와 평균 발화율을 산출.
+  - **출력**: `(hidden_spikes, output_spikes, firing_rates)`.
   - **Theory 연계**: `Theory.md` 2.4절의 준지도 분류 SNN 시뮬레이션.
 
 ### snn/network_grad_mimicry.py
-- `_surrogate_heaviside(x: Tensor, slope: float = 5.0) -> Tensor`
-  - **역할**: 스파이크 비선형을 부드럽게 근사하는 시그모이드 surrogate.
-  - **Theory 연계**: 시나리오 3에서 BPTT를 가능하게 하는 surrogate gradient 기법.
-- `GradMimicryNetwork.__init__(n_input: int = 784, n_hidden: int = 256, n_output: int = 10, hidden_params: Optional[LIFParams] = None, output_params: Optional[LIFParams] = None)`
-  - **역할**: Teacher/에이전트 공유용 입력-은닉-출력 가중치와 파라미터 초기화.
+- `GradMimicryNetwork.__init__(n_input: int = 784, hidden_sizes: Optional[List[int]] = None, n_output: int = 10, hidden_params: Optional[LIFParams] = None, output_params: Optional[LIFParams] = None)`
+  - **역할**: Teacher/에이전트 공유용 입력-다중 은닉-출력 가중치와 파라미터 초기화, surrogate LIF 셀 생성.
   - **Theory 연계**: `Theory.md` 6.4절의 gradient mimicry 실험 네트워크.
-- `forward(input_spikes: Tensor) -> Tuple[Tensor, Tensor]`
+- `forward(input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: surrogate 스파이크를 사용해 은닉/출력 발화율을 계산, 역전파 가능하게 유지.
-  - **출력**: `(output_spikes, firing_rates)`.
+  - **역할**: 각 타임스텝마다 surrogate LIF 셀을 통해 모든 은닉층 막전위/스파이크를 갱신하고, 출력층 발화율을 계산해 역전파 가능하게 유지한다.
+  - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`.
   - **Theory 연계**: Teacher gradient 계산과 에이전트 시뮬레이션을 위한 differentiable forward.
 
 ## rl 모듈

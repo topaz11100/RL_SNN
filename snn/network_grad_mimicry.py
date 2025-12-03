@@ -3,11 +3,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFParams
-
-
-def _surrogate_heaviside(x: Tensor, slope: float = 5.0) -> Tensor:
-    return torch.sigmoid(slope * x)
+from snn.lif import LIFCell, LIFParams
 
 
 class GradMimicryNetwork(nn.Module):
@@ -27,12 +23,17 @@ class GradMimicryNetwork(nn.Module):
         self.n_output = n_output
         self.hidden_params = hidden_params if hidden_params is not None else LIFParams()
         self.output_params = output_params if output_params is not None else LIFParams()
+        self.surrogate_slope = 5.0
 
         layer_sizes = [n_input] + self.hidden_sizes + [n_output]
         weights = []
         for i in range(len(layer_sizes) - 1):
             weights.append(nn.Parameter(torch.rand(layer_sizes[i], layer_sizes[i + 1]) * 0.1))
         self.w_layers = nn.ParameterList(weights)
+
+        # Surrogate LIF dynamics shared across layers (Theory 2.2)
+        self.hidden_cell = LIFCell(self.hidden_params, surrogate=True, slope=self.surrogate_slope)
+        self.output_cell = LIFCell(self.output_params, surrogate=True, slope=self.surrogate_slope)
 
     @property
     def w_input_hidden(self) -> nn.Parameter:
@@ -56,42 +57,32 @@ class GradMimicryNetwork(nn.Module):
         v_states = [torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype) for h in self.hidden_sizes]
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
 
+        if n_hidden_layers == 0:
+            for t in range(T):
+                x_t = input_spikes[:, :, t]
+                current_out = torch.matmul(x_t, torch.relu(self.w_layers[0]))
+                v_output, s_output = self.output_cell(v_output, current_out)
+                output_spikes[:, :, t] = s_output
+            firing_rates = output_spikes.mean(dim=2)
+            return hidden_spikes, output_spikes, firing_rates
+
         s_prev = [torch.zeros_like(v_states[i]) for i in range(n_hidden_layers)]
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
             current = torch.matmul(x_t, torch.relu(self.w_layers[0]))
-            dv = (-(v_states[0] - self.hidden_params.v_rest) + self.hidden_params.R * current) * (
-                self.hidden_params.dt / self.hidden_params.tau
-            )
-            v_states[0] = v_states[0] + dv
-            s_hidden = _surrogate_heaviside(v_states[0] - self.hidden_params.v_th)
-            s_reset = s_hidden.detach()
-            v_states[0] = v_states[0] * (1.0 - s_reset) + self.hidden_params.v_reset * s_reset
+            v_states[0], s_hidden = self.hidden_cell(v_states[0], current)
             hidden_spikes[0][:, :, t] = s_hidden
 
             for li in range(1, n_hidden_layers):
                 current = torch.matmul(s_prev[li - 1], torch.relu(self.w_layers[li]))
-                dv = (-(v_states[li] - self.hidden_params.v_rest) + self.hidden_params.R * current) * (
-                    self.hidden_params.dt / self.hidden_params.tau
-                )
-                v_states[li] = v_states[li] + dv
-                s_curr = _surrogate_heaviside(v_states[li] - self.hidden_params.v_th)
-                s_reset = s_curr.detach()
-                v_states[li] = v_states[li] * (1.0 - s_reset) + self.hidden_params.v_reset * s_reset
+                v_states[li], s_curr = self.hidden_cell(v_states[li], current)
                 hidden_spikes[li][:, :, t] = s_curr
                 s_hidden = s_curr
 
-            current_out = torch.matmul(s_prev[-1], torch.relu(self.w_layers[-1])) if n_hidden_layers > 0 else torch.matmul(
-                s_hidden, torch.relu(self.w_layers[-1])
-            )
-            dv_out = (-(v_output - self.output_params.v_rest) + self.output_params.R * current_out) * (
-                self.output_params.dt / self.output_params.tau
-            )
-            v_output = v_output + dv_out
-            s_output = _surrogate_heaviside(v_output - self.output_params.v_th)
-            s_reset_out = s_output.detach()
-            v_output = v_output * (1.0 - s_reset_out) + self.output_params.v_reset * s_reset_out
+            prev_spikes = s_prev[-1] if n_hidden_layers > 0 else s_hidden
+            current_out = torch.matmul(prev_spikes, torch.relu(self.w_layers[-1]))
+            v_output, s_output = self.output_cell(v_output, current_out)
             output_spikes[:, :, t] = s_output
 
             s_prev[0] = hidden_spikes[0][:, :, t]
