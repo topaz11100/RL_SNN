@@ -4,7 +4,7 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
-from analysis_utils import plot_delta_t_delta_d, plot_weight_histograms
+from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
 
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer

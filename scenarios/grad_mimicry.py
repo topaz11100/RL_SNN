@@ -4,7 +4,7 @@ from typing import List, Tuple
 import torch
 import torch.nn.functional as F
 
-from analysis_utils import plot_grad_alignment
+from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
 from rl.policy import GaussianPolicy
@@ -112,8 +112,18 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
 
 def _layer_indices(num_layers: int, scale: float) -> List[float]:
     if num_layers == 1:
-        return [0.0]
-    return [i / (num_layers - 1) * scale for i in range(num_layers)]
+        return [scale]
+    return [(i + 1) / num_layers * scale for i in range(num_layers)]
+
+
+def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
+    if states.numel() == 0:
+        return torch.empty(0, device=states.device)
+    L = states.size(2)
+    time_idx = torch.arange(L, device=states.device)
+    last_pre = torch.where(states[:, 0, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    last_post = torch.where(states[:, 1, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    return last_pre - last_post
 
 
 def run_grad(args, logger):
@@ -139,6 +149,10 @@ def run_grad(args, logger):
 
     agent_deltas_log = []
     teacher_deltas_log = []
+    delta_t_values = []
+    delta_d_values = []
+
+    weights_before = [w.detach().cpu().clone() for w in network.w_layers]
 
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
@@ -193,6 +207,8 @@ def run_grad(args, logger):
                         )
                         agent_deltas[idx] = delta_mat
                         active_masks[idx] = active_masks[idx] | (delta_mat != 0)
+                        delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
+                        delta_d_values.append(action[idx_slice].detach().cpu())
                         offset += count
 
                     episode_buffer = EpisodeBuffer()
@@ -286,6 +302,17 @@ def run_grad(args, logger):
             )
             if args.log_gradient_stats:
                 logger.info("Gradient alignment mean (train): %.4f", mean_align)
+
+    delta_t_concat = torch.cat(delta_t_values, dim=0) if delta_t_values else torch.empty(0)
+    delta_d_concat = torch.cat(delta_d_values, dim=0) if delta_d_values else torch.empty(0)
+    if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
+        plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+
+    weights_after = [w.detach().cpu().clone() for w in network.w_layers]
+    for i, (w_before, w_after) in enumerate(zip(weights_before, weights_after)):
+        plot_weight_histograms(
+            w_before, w_after, os.path.join(args.result_dir, f"hist_layer{i}.png")
+        )
 
     if agent_deltas_log and teacher_deltas_log:
         agent_cat = torch.cat(agent_deltas_log)
