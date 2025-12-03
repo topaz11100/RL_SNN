@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
+from analysis_utils import plot_delta_t_delta_d, plot_weight_histograms
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
 from rl.policy import GaussianPolicy
@@ -21,7 +22,7 @@ def _ensure_metrics_file(path: str, header: str) -> None:
 
 
 def _gather_events(
-    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int
+    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int, l_norm: float
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
@@ -55,7 +56,8 @@ def _gather_events(
         post_hist = pad_post[batch_idx.unsqueeze(1), post_idx.unsqueeze(1), time_indices]
         histories.append(torch.stack([pre_hist, post_hist], dim=1))
         w_vals = weights[pre_idx, post_idx].unsqueeze(1)
-        extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
+        l_tensor = torch.full_like(w_vals, l_norm)
+        extras.append(torch.cat([w_vals, l_tensor, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
 
@@ -65,7 +67,7 @@ def _gather_events(
     if not histories:
         return (
             torch.empty(0, 2, L, device=device),
-            torch.empty(0, 3, device=device),
+            torch.empty(0, 4, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
         )
@@ -122,6 +124,16 @@ def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[flo
     )
 
 
+def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
+    if states.numel() == 0:
+        return torch.empty(0, device=states.device)
+    L = states.size(2)
+    time_idx = torch.arange(L, device=states.device)
+    last_pre = torch.where(states[:, 0, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    last_post = torch.where(states[:, 1, :] > 0, time_idx, torch.full_like(time_idx, -1)).max(dim=1).values
+    return last_pre - last_post
+
+
 def run_semi(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
@@ -130,10 +142,13 @@ def run_semi(args, logger):
     network = SemiSupervisedNetwork(
         n_hidden=args.N_hidden, hidden_params=lif_params, output_params=lif_params
     ).to(device)
-    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=3).to(device)
-    critic = ValueFunction(extra_feature_dim=3).to(device)
+    actor = GaussianPolicy(sigma=getattr(args, "sigma_semi", args.sigma_unsup1), extra_feature_dim=4).to(device)
+    critic = ValueFunction(extra_feature_dim=4).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
+
+    w_input_hidden_before = network.w_input_hidden.detach().cpu().clone()
+    w_hidden_output_before = network.w_hidden_output.detach().cpu().clone()
 
     metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
@@ -141,6 +156,9 @@ def run_semi(args, logger):
     _ensure_metrics_file(metrics_train, "epoch\tacc\tmargin\treward")
     _ensure_metrics_file(metrics_val, "epoch\tacc\tmargin\treward")
     _ensure_metrics_file(metrics_test, "epoch\tacc\tmargin\treward")
+
+    delta_t_values = []
+    delta_d_values = []
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_margin, epoch_reward = [], [], []
@@ -155,24 +173,51 @@ def run_semi(args, logger):
             batch_buffer = EpisodeBuffer()
 
             for b in range(input_spikes.size(0)):
-                state, extra, pre_idx, post_idx = _gather_events(
-                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len
+                events_in = _gather_events(
+                    input_spikes[b : b + 1], hidden_spikes[b : b + 1], network.w_input_hidden, args.spike_array_len, 0.0
                 )
-                if state.numel() == 0:
-                    continue
+                events_out = _gather_events(
+                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len, 1.0
+                )
 
-                action, log_prob, _ = actor(state, extra)
-                value = critic(state, extra)
+                state_batches = []
+                extra_batches = []
+                slices = []
+                if events_in[0].numel() > 0:
+                    state_batches.append(events_in[0])
+                    extra_batches.append(events_in[1])
+                    slices.append(("in", events_in))
+                if events_out[0].numel() > 0:
+                    state_batches.append(events_out[0])
+                    extra_batches.append(events_out[1])
+                    slices.append(("out", events_out))
 
-                with torch.no_grad():
-                    _scatter_updates(args.local_lr * action, pre_idx, post_idx, network.w_hidden_output)
-                    torch.clamp_(network.w_hidden_output, args.exc_clip_min, args.exc_clip_max)
+                if state_batches:
+                    states = torch.cat(state_batches, dim=0)
+                    extras = torch.cat(extra_batches, dim=0)
 
-                episode_buffer = EpisodeBuffer()
-                for i in range(state.size(0)):
-                    episode_buffer.append(state[i], extra[i], action[i], log_prob[i], value[i])
-                episode_buffer.finalize(r_total[b])
-                batch_buffer.extend(episode_buffer)
+                    action, log_prob, _ = actor(states, extras)
+                    value = critic(states, extras)
+
+                    offset = 0
+                    episode_buffer = EpisodeBuffer()
+                    for name, events in slices:
+                        count = events[0].size(0)
+                        idx_slice = slice(offset, offset + count)
+                        if name == "in":
+                            _scatter_updates(args.local_lr * action[idx_slice], events[2], events[3], network.w_input_hidden)
+                            torch.clamp_(network.w_input_hidden, args.exc_clip_min, args.exc_clip_max)
+                        else:
+                            _scatter_updates(args.local_lr * action[idx_slice], events[2], events[3], network.w_hidden_output)
+                            torch.clamp_(network.w_hidden_output, args.exc_clip_min, args.exc_clip_max)
+                        delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
+                        delta_d_values.append(action[idx_slice].detach().cpu())
+                        offset += count
+
+                    for i in range(states.size(0)):
+                        episode_buffer.append(states[i], extras[i], action[i], log_prob[i], value[i])
+                    episode_buffer.finalize(r_total[b])
+                    batch_buffer.extend(episode_buffer)
 
             if len(batch_buffer) > 0:
                 ppo_update(
@@ -216,3 +261,11 @@ def run_semi(args, logger):
                 val_acc,
                 test_acc,
             )
+
+    delta_t_concat = torch.cat(delta_t_values, dim=0) if delta_t_values else torch.empty(0)
+    delta_d_concat = torch.cat(delta_d_values, dim=0) if delta_d_values else torch.empty(0)
+    if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
+        plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+
+    plot_weight_histograms(w_input_hidden_before, network.w_input_hidden.detach().cpu(), os.path.join(args.result_dir, "hist_input_hidden.png"))
+    plot_weight_histograms(w_hidden_output_before, network.w_hidden_output.detach().cpu(), os.path.join(args.result_dir, "hist_hidden_output.png"))
