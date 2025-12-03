@@ -29,10 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of epochs for training (default for smoke tests)",
     )
-    parser.add_argument("--T-unsup1", type=int, default=10, help="Timesteps for unsupervised scenario 1")
-    parser.add_argument("--T-unsup2", type=int, default=10, help="Timesteps for unsupervised scenario 2")
-    parser.add_argument("--T-semi", type=int, default=10, help="Timesteps for semi-supervised scenario")
-    parser.add_argument("--T-sup", type=int, default=10, help="Timesteps for supervised gradient mimicry")
+    parser.add_argument("--T-unsup1", type=int, default=100, help="Timesteps for unsupervised scenario 1")
+    parser.add_argument("--T-unsup2", type=int, default=100, help="Timesteps for unsupervised scenario 2")
+    parser.add_argument("--T-semi", type=int, default=100, help="Timesteps for semi-supervised scenario")
+    parser.add_argument("--T-sup", type=int, default=100, help="Timesteps for supervised gradient mimicry")
     parser.add_argument("--spike-array-len", type=int, default=20, help="Spike history length L for policy inputs")
     parser.add_argument("--sigma-unsup1", type=float, default=0.1, help="Gaussian sigma for unsup1 policy")
     parser.add_argument("--sigma-unsup2", type=float, default=0.1, help="Gaussian sigma for unsup2 policies")

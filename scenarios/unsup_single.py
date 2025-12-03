@@ -141,6 +141,7 @@ def run_unsup1(args, logger):
     _ensure_eval_file(metrics_val)
     _ensure_eval_file(metrics_test)
 
+    s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
         for images, _, indices in train_loader:
@@ -203,10 +204,14 @@ def run_unsup1(args, logger):
                     for name, count in slices:
                         idx_slice = slice(offset, offset + count)
                         if name == "exc":
-                            _scatter_updates(args.local_lr * action[idx_slice], pre_exc, post_exc, network.w_input_exc)
+                            _scatter_updates(
+                                args.local_lr * s_scen * action[idx_slice], pre_exc, post_exc, network.w_input_exc
+                            )
                             torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
                         else:
-                            _scatter_updates(args.local_lr * action[idx_slice], pre_inh, post_inh, network.w_inh_exc)
+                            _scatter_updates(
+                                args.local_lr * s_scen * action[idx_slice], pre_inh, post_inh, network.w_inh_exc
+                            )
                             torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
                         offset += count
 

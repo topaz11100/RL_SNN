@@ -138,6 +138,7 @@ def run_grad(args, logger):
     agent_deltas_log = []
     teacher_deltas_log = []
 
+    s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_reward, epoch_align = [], [], []
         for images, labels, _ in train_loader:
@@ -186,7 +187,7 @@ def run_grad(args, logger):
                         count = events[0].size(0)
                         idx_slice = slice(offset, offset + count)
                         delta_mat = _scatter_updates(
-                            args.local_lr * action[idx_slice], events[2], events[3], network.w_layers[idx]
+                            args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_layers[idx]
                         )
                         agent_deltas[idx] = delta_mat
                         active_masks[idx] = active_masks[idx] | (delta_mat != 0)

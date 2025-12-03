@@ -141,6 +141,7 @@ def run_unsup2(args, logger):
     _ensure_eval_file(metrics_val)
     _ensure_eval_file(metrics_test)
 
+    s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
         for images, _, indices in train_loader:
@@ -180,7 +181,7 @@ def run_unsup2(args, logger):
                     action_exc, logp_exc, _ = actor_exc(state_exc, extra_exc)
                     value_exc = critic(state_exc, extra_exc)
                     with torch.no_grad():
-                        _scatter_updates(args.local_lr * action_exc, pre_exc, post_exc, network.w_input_exc)
+                        _scatter_updates(args.local_lr * s_scen * action_exc, pre_exc, post_exc, network.w_input_exc)
                         torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
 
                     buffer_exc = EpisodeBuffer()
@@ -196,7 +197,7 @@ def run_unsup2(args, logger):
                     action_inh, logp_inh, _ = actor_inh(state_inh, extra_inh)
                     value_inh = critic(state_inh, extra_inh)
                     with torch.no_grad():
-                        _scatter_updates(args.local_lr * action_inh, pre_inh, post_inh, network.w_inh_exc)
+                        _scatter_updates(args.local_lr * s_scen * action_inh, pre_inh, post_inh, network.w_inh_exc)
                         torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
 
                     buffer_inh = EpisodeBuffer()
