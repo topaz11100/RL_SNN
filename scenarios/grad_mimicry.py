@@ -83,7 +83,6 @@ def _gather_events(
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     delta_matrix = torch.zeros_like(weights)
     delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
-    weights.data.add_(delta_matrix)
     return delta_matrix
 
 
@@ -173,6 +172,7 @@ def run_grad(args, logger):
                         event_specs.append((idx, events))
 
                 agent_deltas = [torch.zeros_like(w) for w in network.w_layers]
+                active_masks = [torch.zeros_like(w, dtype=torch.bool) for w in network.w_layers]
 
                 if states_all:
                     states = torch.cat(states_all, dim=0)
@@ -189,7 +189,7 @@ def run_grad(args, logger):
                             args.local_lr * action[idx_slice], events[2], events[3], network.w_layers[idx]
                         )
                         agent_deltas[idx] = delta_mat
-                        torch.clamp_(network.w_layers[idx], args.exc_clip_min, args.exc_clip_max)
+                        active_masks[idx] = active_masks[idx] | (delta_mat != 0)
                         offset += count
 
                     episode_buffer = EpisodeBuffer()
@@ -212,9 +212,20 @@ def run_grad(args, logger):
                     -args.alpha_align * teacher.w_layers[i].grad for i in range(len(teacher.w_layers))
                 ]
 
-                total_synapses = sum(d.numel() for d in teacher_deltas)
-                align_loss = sum((agent_deltas[i] - teacher_deltas[i]).pow(2).sum() for i in range(len(agent_deltas)))
-                align_loss = align_loss / total_synapses if total_synapses > 0 else torch.tensor(0.0, device=device)
+                squared_error_sum = torch.tensor(0.0, device=device)
+                active_count = torch.tensor(0, device=device, dtype=torch.long)
+
+                for i in range(len(agent_deltas)):
+                    mask = active_masks[i]
+                    diff = agent_deltas[i] - teacher_deltas[i]
+                    squared_error_sum = squared_error_sum + (diff.pow(2) * mask).sum()
+                    active_count = active_count + mask.sum()
+
+                align_loss = (
+                    squared_error_sum / active_count.float()
+                    if active_count.item() > 0
+                    else torch.tensor(0.0, device=device)
+                )
                 reward = -align_loss
 
                 epoch_reward.append(reward.item())
@@ -223,6 +234,11 @@ def run_grad(args, logger):
                 if len(episode_buffer) > 0:
                     episode_buffer.finalize(reward)
                     batch_buffer.extend(episode_buffer)
+
+                with torch.no_grad():
+                    for i in range(len(network.w_layers)):
+                        network.w_layers[i].add_(agent_deltas[i])
+                        torch.clamp_(network.w_layers[i], args.exc_clip_min, args.exc_clip_max)
 
                 for a_d, t_d in zip(agent_deltas, teacher_deltas):
                     agent_deltas_log.append(a_d.detach().cpu().flatten())
