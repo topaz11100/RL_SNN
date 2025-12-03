@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
+from analysis_utils import compute_neuron_labels, evaluate_labeling
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
 from rl.policy import GaussianPolicy
@@ -20,11 +21,16 @@ def _ensure_metrics_file(path: str) -> None:
             f.write("epoch\tR_sparse\tR_div\tR_stab\tR_total\n")
 
 
-def _compute_reward_components(exc_spikes: torch.Tensor, rho_target: float) -> Tuple[torch.Tensor, torch.Tensor]:
+def _ensure_eval_file(path: str) -> None:
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("epoch\taccuracy\n")
+
+
+def _compute_sparse_reward(exc_spikes: torch.Tensor, rho_target: float) -> Tuple[torch.Tensor, torch.Tensor]:
     firing_rates = exc_spikes.mean(dim=2)
-    r_sparse = -(firing_rates.mean(dim=1) - rho_target).abs()
-    r_div = firing_rates.std(dim=1)
-    return r_sparse, r_div
+    r_sparse = -((firing_rates.mean(dim=1) - rho_target) ** 2)
+    return r_sparse, firing_rates
 
 
 def _gather_events(
@@ -51,12 +57,14 @@ def _gather_events(
             pre_idx = indices[:, 1].repeat_interleave(n_post)
             post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
             e_type = torch.tensor([1.0, 0.0], device=device)
+            repeat_count = n_post
         else:
             batch_idx = indices[:, 0].repeat_interleave(n_pre)
             post_idx = indices[:, 1].repeat_interleave(n_pre)
             pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
             e_type = torch.tensor([0.0, 1.0], device=device)
-        time_idx = indices[:, 2].repeat_interleave(n_post if is_pre_event else n_pre)
+            repeat_count = n_pre
+        time_idx = indices[:, 2].repeat_interleave(repeat_count)
         pos = time_idx + (L - 1)
         time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
         pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
@@ -95,12 +103,29 @@ def _scatter_updates(
     return delta_matrix
 
 
+def _collect_firing_rates(network: DiehlCookNetwork, loader, device, args):
+    network.eval()
+    rates, labels = [], []
+    with torch.no_grad():
+        for images, lbls, _ in loader:
+            images = images.to(device)
+            lbls = lbls.to(device)
+            spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate).to(device)
+            exc_spikes, _ = network(spikes)
+            rates.append(exc_spikes.mean(dim=2))
+            labels.append(lbls)
+    network.train()
+    return torch.cat(rates, dim=0), torch.cat(labels, dim=0)
+
+
 def run_unsup1(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_loader, _, _ = get_mnist_dataloaders(args.batch_size_images, args.seed)
+    train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
     base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
     prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
+    winner_counts = torch.zeros(args.N_E, device=device)
+    total_seen = 0.0
 
     lif_params = LIFParams(dt=args.dt)
     network = DiehlCookNetwork(n_exc=args.N_E, n_inh=args.N_E, exc_params=lif_params, inh_params=lif_params).to(device)
@@ -110,7 +135,11 @@ def run_unsup1(args, logger):
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
     metrics_path = os.path.join(args.result_dir, "metrics_train.txt")
+    metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
+    metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
     _ensure_metrics_file(metrics_path)
+    _ensure_eval_file(metrics_val)
+    _ensure_eval_file(metrics_test)
 
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
@@ -118,13 +147,12 @@ def run_unsup1(args, logger):
             images = images.to(device)
             indices = indices.to(device)
             input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate).to(device)
-            exc_spikes, _ = network(input_spikes)
+            exc_spikes, inh_spikes = network(input_spikes)
 
-            r_sparse, r_div = _compute_reward_components(exc_spikes, args.rho_target)
+            r_sparse, firing_rates = _compute_sparse_reward(exc_spikes, args.rho_target)
 
             batch_buffer = EpisodeBuffer()
 
-            firing_rates = exc_spikes.mean(dim=2)
             winners = firing_rates.argmax(dim=1)
 
             for b in range(input_spikes.size(0)):
@@ -132,42 +160,63 @@ def run_unsup1(args, logger):
                 r_stab_value = 0.0 if prev < 0 else (1.0 if winners[b].item() == prev else -1.0)
                 prev_winners[indices[b]] = winners[b]
 
-                state, extra, pre_idx, post_idx = _gather_events(
-                    input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
-                )
-                if state.numel() == 0:
-                    epoch_sparse.append(r_sparse[b].item())
-                    epoch_div.append(r_div[b].item())
-                    epoch_stab.append(r_stab_value)
-                    total_reward = (
-                        args.alpha_sparse * r_sparse[b]
-                        + args.alpha_div * r_div[b]
-                        + args.alpha_stab * torch.tensor(r_stab_value, device=device)
-                    )
-                    epoch_total.append(total_reward.item())
-                    continue
+                winner_counts[winners[b]] += 1
+                total_seen += 1
+                p = winner_counts / total_seen
+                uniform = 1.0 / args.N_E
+                r_div_value = -(p - uniform).pow(2).sum()
 
-                action, log_prob, _ = actor(state, extra)
-                value = critic(state, extra)
-
-                with torch.no_grad():
-                    # Δw_i(t) = η_w * s_scen * Δd_i(t); unsup1 uses s_scen = 1
-                    _scatter_updates(args.local_lr * action, pre_idx, post_idx, network.w_input_exc)
-                    torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
-
-                episode_buffer = EpisodeBuffer()
-                for i in range(state.size(0)):
-                    episode_buffer.append(state[i], extra[i], action[i], log_prob[i], value[i])
                 total_reward = (
                     args.alpha_sparse * r_sparse[b]
-                    + args.alpha_div * r_div[b]
+                    + args.alpha_div * r_div_value
                     + args.alpha_stab * torch.tensor(r_stab_value, device=device)
                 )
-                episode_buffer.finalize(total_reward)
-                batch_buffer.extend(episode_buffer)
+
+                state_exc, extra_exc, pre_exc, post_exc = _gather_events(
+                    input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
+                )
+                state_inh, extra_inh, pre_inh, post_inh = _gather_events(
+                    inh_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_inh_exc, args.spike_array_len
+                )
+
+                states, extras = [], []
+                slices = []
+                if state_exc.numel() > 0:
+                    states.append(state_exc)
+                    extras.append(extra_exc)
+                    slices.append(("exc", state_exc.size(0)))
+                if state_inh.numel() > 0:
+                    states.append(state_inh)
+                    extras.append(extra_inh)
+                    slices.append(("inh", state_inh.size(0)))
+
+                if states:
+                    states_cat = torch.cat(states, dim=0)
+                    extras_cat = torch.cat(extras, dim=0)
+
+                    action, log_prob, _ = actor(states_cat, extras_cat)
+                    value = critic(states_cat, extras_cat)
+
+                    offset = 0
+                    episode_buffer = EpisodeBuffer()
+
+                    for name, count in slices:
+                        idx_slice = slice(offset, offset + count)
+                        if name == "exc":
+                            _scatter_updates(args.local_lr * action[idx_slice], pre_exc, post_exc, network.w_input_exc)
+                            torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
+                        else:
+                            _scatter_updates(args.local_lr * action[idx_slice], pre_inh, post_inh, network.w_inh_exc)
+                            torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
+                        offset += count
+
+                    for i in range(states_cat.size(0)):
+                        episode_buffer.append(states_cat[i], extras_cat[i], action[i], log_prob[i], value[i])
+                    episode_buffer.finalize(total_reward)
+                    batch_buffer.extend(episode_buffer)
 
                 epoch_sparse.append(r_sparse[b].item())
-                epoch_div.append(r_div[b].item())
+                epoch_div.append(r_div_value.item())
                 epoch_stab.append(r_stab_value)
                 epoch_total.append(total_reward.item())
 
@@ -192,12 +241,29 @@ def run_unsup1(args, logger):
         with open(metrics_path, "a") as f:
             f.write(f"{epoch}\t{mean_sparse:.6f}\t{mean_div:.6f}\t{mean_stab:.6f}\t{mean_total:.6f}\n")
 
+        train_rates, train_labels = _collect_firing_rates(network, train_loader, device, args)
+        neuron_labels = compute_neuron_labels(train_rates, train_labels, num_classes=10)
+
+        val_rates, val_labels = _collect_firing_rates(network, val_loader, device, args)
+        val_acc, _ = evaluate_labeling(val_rates, val_labels, neuron_labels, 10, os.path.join(args.result_dir, f"val_confusion_epoch{epoch}"))
+        test_rates, test_labels = _collect_firing_rates(network, test_loader, device, args)
+        test_acc, _ = evaluate_labeling(
+            test_rates, test_labels, neuron_labels, 10, os.path.join(args.result_dir, f"test_confusion_epoch{epoch}")
+        )
+
+        with open(metrics_val, "a") as f:
+            f.write(f"{epoch}\t{val_acc:.6f}\n")
+        with open(metrics_test, "a") as f:
+            f.write(f"{epoch}\t{test_acc:.6f}\n")
+
         if epoch % args.log_interval == 0:
             logger.info(
-                "Epoch %d | R_sparse %.4f | R_div %.4f | R_stab %.4f | R_total %.4f",
+                "Epoch %d | R_sparse %.4f | R_div %.4f | R_stab %.4f | R_total %.4f | Val acc %.4f | Test acc %.4f",
                 epoch,
                 mean_sparse,
                 mean_div,
                 mean_stab,
                 mean_total,
+                val_acc,
+                test_acc,
             )
