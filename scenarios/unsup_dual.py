@@ -1,5 +1,5 @@
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -34,7 +34,11 @@ def _compute_sparse_reward(exc_spikes: torch.Tensor, rho_target: float) -> Tuple
 
 
 def _gather_events(
-    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int
+    pre_spikes: torch.Tensor,
+    post_spikes: torch.Tensor,
+    weights: torch.Tensor,
+    L: int,
+    valid_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
@@ -65,6 +69,14 @@ def _gather_events(
             e_type = torch.tensor([0.0, 1.0], device=device)
             repeat_count = n_pre
         time_idx = indices[:, 2].repeat_interleave(repeat_count)
+        if valid_mask is not None:
+            mask_flat = valid_mask[pre_idx, post_idx] > 0.5
+            if mask_flat.sum() == 0:
+                return
+            batch_idx = batch_idx[mask_flat]
+            pre_idx = pre_idx[mask_flat]
+            post_idx = post_idx[mask_flat]
+            time_idx = time_idx[mask_flat]
         pos = time_idx + (L - 1)
         time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
         pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
@@ -94,9 +106,17 @@ def _gather_events(
     )
 
 
-def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> None:
+def _scatter_updates(
+    delta: torch.Tensor,
+    pre_idx: torch.Tensor,
+    post_idx: torch.Tensor,
+    weights: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> None:
     delta_matrix = torch.zeros_like(weights)
     delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
+    if valid_mask is not None:
+        delta_matrix = delta_matrix * valid_mask
     weights.data.add_(delta_matrix)
 
 
@@ -210,13 +230,23 @@ def run_unsup2(args, logger):
                     batch_buffer_exc.extend(buffer_exc)
 
                 state_inh, extra_inh, pre_inh, post_inh = _gather_events(
-                    inh_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_inh_exc, args.spike_array_len
+                    inh_spikes[b : b + 1],
+                    exc_spikes[b : b + 1],
+                    network.w_inh_exc,
+                    args.spike_array_len,
+                    valid_mask=network.inh_exc_mask,
                 )
                 if state_inh.numel() > 0:
                     action_inh, logp_inh, _ = actor_inh(state_inh, extra_inh)
                     value_inh = critic(state_inh, extra_inh)
                     with torch.no_grad():
-                        _scatter_updates(args.local_lr * s_scen * action_inh, pre_inh, post_inh, network.w_inh_exc)
+                        _scatter_updates(
+                            args.local_lr * s_scen * action_inh,
+                            pre_inh,
+                            post_inh,
+                            network.w_inh_exc,
+                            valid_mask=network.inh_exc_mask,
+                        )
                         torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
                     delta_t_inh.append(_extract_delta_t(state_inh).detach().cpu())
                     delta_d_inh.append(action_inh.detach().cpu())
