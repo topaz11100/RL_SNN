@@ -244,7 +244,8 @@ def run_unsup1(args, logger):
                             _scatter_updates(
                                 args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_input_exc
                             )
-                            torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
+                            with torch.no_grad():
+                                network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
                         else:
                             _scatter_updates(
                                 args.local_lr * s_scen * action[idx_slice],
@@ -253,7 +254,8 @@ def run_unsup1(args, logger):
                                 network.w_inh_exc,
                                 valid_mask=network.inh_exc_mask,
                             )
-                            torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
+                            with torch.no_grad():
+                                network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
                         delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
                         delta_d_values.append(action[idx_slice].detach().cpu())
                         offset += count
