@@ -66,6 +66,8 @@ class GradMimicryNetwork(nn.Module):
             )
             v_states[0] = v_states[0] + dv
             s_hidden = _surrogate_heaviside(v_states[0] - self.hidden_params.v_th)
+            s_reset = s_hidden.detach()
+            v_states[0] = v_states[0] * (1.0 - s_reset) + self.hidden_params.v_reset * s_reset
             hidden_spikes[0][:, :, t] = s_hidden
 
             for li in range(1, n_hidden_layers):
@@ -75,6 +77,8 @@ class GradMimicryNetwork(nn.Module):
                 )
                 v_states[li] = v_states[li] + dv
                 s_curr = _surrogate_heaviside(v_states[li] - self.hidden_params.v_th)
+                s_reset = s_curr.detach()
+                v_states[li] = v_states[li] * (1.0 - s_reset) + self.hidden_params.v_reset * s_reset
                 hidden_spikes[li][:, :, t] = s_curr
                 s_hidden = s_curr
 
@@ -86,6 +90,8 @@ class GradMimicryNetwork(nn.Module):
             )
             v_output = v_output + dv_out
             s_output = _surrogate_heaviside(v_output - self.output_params.v_th)
+            s_reset_out = s_output.detach()
+            v_output = v_output * (1.0 - s_reset_out) + self.output_params.v_reset * s_reset_out
             output_spikes[:, :, t] = s_output
 
             s_prev[0] = hidden_spikes[0][:, :, t]
