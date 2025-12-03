@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from analysis_utils import plot_delta_t_delta_d, plot_weight_histograms
+
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EpisodeBuffer
 from rl.policy import GaussianPolicy
@@ -160,6 +161,7 @@ def run_semi(args, logger):
     delta_t_values = []
     delta_d_values = []
 
+    s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_margin, epoch_reward = [], [], []
         for images, labels, _ in train_loader:
@@ -205,10 +207,14 @@ def run_semi(args, logger):
                         count = events[0].size(0)
                         idx_slice = slice(offset, offset + count)
                         if name == "in":
-                            _scatter_updates(args.local_lr * action[idx_slice], events[2], events[3], network.w_input_hidden)
+                            _scatter_updates(
+                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_input_hidden
+                            )
                             torch.clamp_(network.w_input_hidden, args.exc_clip_min, args.exc_clip_max)
                         else:
-                            _scatter_updates(args.local_lr * action[idx_slice], events[2], events[3], network.w_hidden_output)
+                            _scatter_updates(
+                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_hidden_output
+                            )
                             torch.clamp_(network.w_hidden_output, args.exc_clip_min, args.exc_clip_max)
                         delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
                         delta_d_values.append(action[idx_slice].detach().cpu())
