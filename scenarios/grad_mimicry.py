@@ -257,7 +257,7 @@ def run_grad(args, logger):
                 with torch.no_grad():
                     for i in range(len(network.w_layers)):
                         network.w_layers[i].add_(agent_deltas[i])
-                        torch.clamp_(network.w_layers[i], args.exc_clip_min, args.exc_clip_max)
+                        network.w_layers[i].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for a_d, t_d in zip(agent_deltas, teacher_deltas):
                     agent_deltas_log.append(a_d.detach().cpu().flatten())

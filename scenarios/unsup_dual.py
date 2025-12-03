@@ -219,7 +219,7 @@ def run_unsup2(args, logger):
                     value_exc = critic(state_exc, extra_exc)
                     with torch.no_grad():
                         _scatter_updates(args.local_lr * s_scen * action_exc, pre_exc, post_exc, network.w_input_exc)
-                        torch.clamp_(network.w_input_exc, args.exc_clip_min, args.exc_clip_max)
+                        network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
                     delta_t_exc.append(_extract_delta_t(state_exc).detach().cpu())
                     delta_d_exc.append(action_exc.detach().cpu())
 
@@ -247,7 +247,7 @@ def run_unsup2(args, logger):
                             network.w_inh_exc,
                             valid_mask=network.inh_exc_mask,
                         )
-                        torch.clamp_(network.w_inh_exc, args.inh_clip_min, args.inh_clip_max)
+                        network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
                     delta_t_inh.append(_extract_delta_t(state_inh).detach().cpu())
                     delta_d_inh.append(action_inh.detach().cpu())
 

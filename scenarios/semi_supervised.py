@@ -211,12 +211,14 @@ def run_semi(args, logger):
                             _scatter_updates(
                                 args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_input_hidden
                             )
-                            torch.clamp_(network.w_input_hidden, args.exc_clip_min, args.exc_clip_max)
+                            with torch.no_grad():
+                                network.w_input_hidden.clamp_(args.exc_clip_min, args.exc_clip_max)
                         else:
                             _scatter_updates(
                                 args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_hidden_output
                             )
-                            torch.clamp_(network.w_hidden_output, args.exc_clip_min, args.exc_clip_max)
+                            with torch.no_grad():
+                                network.w_hidden_output.clamp_(args.exc_clip_min, args.exc_clip_max)
                         delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
                         delta_d_values.append(action[idx_slice].detach().cpu())
                         offset += count
