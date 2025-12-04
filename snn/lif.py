@@ -16,7 +16,6 @@ class LIFParams:
     R: float = 1.0
 
 
-@torch.jit.script
 def lif_dynamics(
     v: Tensor,
     I: Tensor,
@@ -46,13 +45,19 @@ def lif_dynamics(
     return v_next, spikes
 
 
-@torch.jit.script
+# Optimized: Provide both non-JIT and scripted variants to avoid vmap/JIT conflicts while
+# still enabling scripted kernels where safe.
+lif_dynamics_script = torch.jit.script(lif_dynamics)
+
+
 def lif_step(v: Tensor, I_syn: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
     """Single LIF update step (Theory 2.2 hard Heaviside)."""
     return lif_dynamics(v, I_syn, params, surrogate=False)
 
 
-@torch.jit.script
+lif_step_script = torch.jit.script(lif_step)
+
+
 def lif_forward(I: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
     """Vectorized LIF simulation over time (Theory 2.2)."""
     if I.dim() == 2:

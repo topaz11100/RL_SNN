@@ -43,7 +43,6 @@ class GradMimicryNetwork(nn.Module):
     def w_hidden_output(self) -> nn.Parameter:
         return self.w_layers[-1]
 
-    @torch.jit.export
     def forward(self, input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]:
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
@@ -53,10 +52,9 @@ class GradMimicryNetwork(nn.Module):
 
         n_hidden_layers = len(self.hidden_sizes)
 
-        hidden_spikes_list: List[List[Tensor]] = torch.jit.annotate(List[List[Tensor]], [])
-        for _ in range(n_hidden_layers):
-            hidden_spikes_list.append([])
-        output_spikes_list: List[Tensor] = torch.jit.annotate(List[Tensor], [])
+        # Fix: keep pure-PyTorch control flow for vmap compatibility and to avoid inplace traces.
+        hidden_spikes_list: List[List[Tensor]] = [[] for _ in range(n_hidden_layers)]
+        output_spikes_list: List[Tensor] = []
 
         v_states = [torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype) for h in self.hidden_sizes]
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
