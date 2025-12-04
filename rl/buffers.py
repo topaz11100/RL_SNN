@@ -77,8 +77,8 @@ class EventBatchBuffer:
             return
         count = states.size(0)
         device = states.device
-        self.states.append(states)
-        self.extra_features.append(extras)
+        self.states.append(states.detach())
+        self.extra_features.append(extras.detach())
         self.episode_ids.append(torch.full((count,), episode_id, device=device, dtype=torch.long))
         self.connection_ids.append(torch.full((count,), connection_id, device=device, dtype=torch.long))
         self.pre_indices.append(pre_idx)
