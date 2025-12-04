@@ -16,6 +16,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="Mini-batch size in number of images",
     )
+    parser.add_argument(
+        "--event-batch-size",
+        type=int,
+        default=2048,
+        help="Mini-batch size for processing flattened events with the actor/critic",
+    )
     parser.add_argument("--run-name", type=str, default=None, help="Name for the current run / result directory")
     parser.add_argument(
         "--log-interval",

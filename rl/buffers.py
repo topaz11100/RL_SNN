@@ -51,3 +51,51 @@ class EpisodeBuffer:
 
     def __len__(self) -> int:
         return len(self.states)
+
+
+class EventBatchBuffer:
+    """Buffer to accumulate events across multiple episodes before PPO updates."""
+
+    def __init__(self):
+        self.states: List[torch.Tensor] = []
+        self.extra_features: List[torch.Tensor] = []
+        self.episode_ids: List[torch.Tensor] = []
+        self.connection_ids: List[torch.Tensor] = []
+        self.pre_indices: List[torch.Tensor] = []
+        self.post_indices: List[torch.Tensor] = []
+
+    def add(
+        self,
+        episode_id: int,
+        connection_id: int,
+        states: torch.Tensor,
+        extras: torch.Tensor,
+        pre_idx: torch.Tensor,
+        post_idx: torch.Tensor,
+    ) -> None:
+        if states.numel() == 0:
+            return
+        count = states.size(0)
+        device = states.device
+        self.states.append(states)
+        self.extra_features.append(extras)
+        self.episode_ids.append(torch.full((count,), episode_id, device=device, dtype=torch.long))
+        self.connection_ids.append(torch.full((count,), connection_id, device=device, dtype=torch.long))
+        self.pre_indices.append(pre_idx)
+        self.post_indices.append(post_idx)
+
+    def flatten(self) -> Tuple[torch.Tensor, ...]:
+        if not self.states:
+            raise ValueError("No events were added to the buffer")
+        states = torch.cat(self.states, dim=0)
+        extras = torch.cat(self.extra_features, dim=0) if self.extra_features else torch.empty(0, device=states.device)
+        episode_ids = torch.cat(self.episode_ids, dim=0)
+        connection_ids = torch.cat(self.connection_ids, dim=0)
+        pre_idx = torch.cat(self.pre_indices, dim=0)
+        post_idx = torch.cat(self.post_indices, dim=0)
+        return states, extras, episode_ids, connection_ids, pre_idx, post_idx
+
+    def __len__(self) -> int:
+        if not self.states:
+            return 0
+        return sum(t.size(0) for t in self.states)
