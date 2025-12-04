@@ -172,8 +172,8 @@ def _collect_firing_rates(network: DiehlCookNetwork, loader, device, args):
             lbls = lbls.to(device)
             spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate).to(device)
             exc_spikes, _ = network(spikes)
-            rates.append(exc_spikes.mean(dim=2))
-            labels.append(lbls)
+            rates.append(exc_spikes.mean(dim=2).detach().cpu())
+            labels.append(lbls.detach().cpu())
     network.train()
     return torch.cat(rates, dim=0), torch.cat(labels, dim=0)
 
@@ -272,10 +272,10 @@ def run_unsup1(args, logger):
             if state_inh.numel() > 0:
                 event_buffer.add(indices[batch_inh], 1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
 
-            epoch_sparse.append(r_sparse.detach())
-            epoch_div.append(r_div.detach())
-            epoch_stab.append(r_stab.detach())
-            epoch_total.append(total_reward.detach())
+            epoch_sparse.append(r_sparse.detach().cpu())
+            epoch_div.append(r_div.detach().cpu())
+            epoch_stab.append(r_stab.detach().cpu())
+            epoch_total.append(total_reward.detach().cpu())
 
             if len(event_buffer) > 0:
                 states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
@@ -306,8 +306,8 @@ def run_unsup1(args, logger):
 
                 delta = args.local_lr * s_scen * actions.detach()
                 _apply_weight_updates(delta, connection_ids, pre_idx, post_idx, network, args)
-                delta_t_values.append(_extract_delta_t(states).detach())
-                delta_d_values.append(actions.detach())
+                delta_t_values.append(_extract_delta_t(states).detach().cpu())
+                delta_d_values.append(actions.detach().cpu())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -318,10 +318,10 @@ def run_unsup1(args, logger):
                     len(train_loader),
                 )
 
-        sparse_tensor = torch.cat(epoch_sparse) if epoch_sparse else torch.empty(0, device=device)
-        div_tensor = torch.cat(epoch_div) if epoch_div else torch.empty(0, device=device)
-        stab_tensor = torch.cat(epoch_stab) if epoch_stab else torch.empty(0, device=device)
-        total_tensor = torch.cat(epoch_total) if epoch_total else torch.empty(0, device=device)
+        sparse_tensor = torch.cat(epoch_sparse) if epoch_sparse else torch.empty(0)
+        div_tensor = torch.cat(epoch_div) if epoch_div else torch.empty(0)
+        stab_tensor = torch.cat(epoch_stab) if epoch_stab else torch.empty(0)
+        total_tensor = torch.cat(epoch_total) if epoch_total else torch.empty(0)
         mean_sparse = sparse_tensor.mean().item() if sparse_tensor.numel() > 0 else 0.0
         mean_div = div_tensor.mean().item() if div_tensor.numel() > 0 else 0.0
         mean_stab = stab_tensor.mean().item() if stab_tensor.numel() > 0 else 0.0
