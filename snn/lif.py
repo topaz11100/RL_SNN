@@ -16,6 +16,7 @@ class LIFParams:
     R: float = 1.0
 
 
+@torch.jit.script
 def lif_dynamics(
     v: Tensor,
     I: Tensor,
@@ -24,18 +25,7 @@ def lif_dynamics(
     surrogate: bool = False,
     slope: float = 5.0,
 ) -> Tuple[Tensor, Tensor]:
-    """공통 LIF 동역학 (Theory 2.2).
-
-    Args:
-        v: Membrane potential. Shape: (batch, neurons)
-        I: Synaptic input current. Shape: (batch, neurons)
-        params: LIF parameters.
-        surrogate: Whether to use surrogate gradient spikes.
-        slope: Surrogate sigmoid slope when surrogate=True.
-
-    Returns:
-        Tuple of (next membrane potential, spikes).
-    """
+    """공통 LIF 동역학 (Theory 2.2)."""
     if v.shape != I.shape:
         raise ValueError(f"v and I must have the same shape, got {v.shape} and {I.shape}")
 
@@ -56,37 +46,33 @@ def lif_dynamics(
     return v_next, spikes
 
 
+@torch.jit.script
 def lif_step(v: Tensor, I_syn: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
     """Single LIF update step (Theory 2.2 hard Heaviside)."""
     return lif_dynamics(v, I_syn, params, surrogate=False)
 
 
+@torch.jit.script
 def lif_forward(I: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
-    """Vectorized LIF simulation over time (Theory 2.2).
-
-    Args:
-        I: Input current of shape (batch, neurons, T) or (batch, neurons).
-        params: LIF parameters.
-
-    Returns:
-        V: Membrane potentials of shape (batch, neurons, T)
-        S: Spike trains of shape (batch, neurons, T)
-    """
+    """Vectorized LIF simulation over time (Theory 2.2)."""
     if I.dim() == 2:
         I = I.unsqueeze(-1)
     if I.dim() != 3:
         raise ValueError("Input current must have shape (batch, neurons, T) or (batch, neurons)")
 
     batch_size, num_neurons, T = I.shape
-    device = I.device
-    V = torch.zeros((batch_size, num_neurons, T), device=device, dtype=I.dtype)
-    S = torch.zeros_like(V)
+    v = torch.full((batch_size, num_neurons), fill_value=params.v_rest, device=I.device, dtype=I.dtype)
 
-    v = torch.full((batch_size, num_neurons), fill_value=params.v_rest, device=device, dtype=I.dtype)
+    v_hist: Tuple[Tensor, ...] = ()
+    s_hist: Tuple[Tensor, ...] = ()
+
     for t in range(T):
         v, spikes = lif_step(v, I[:, :, t], params)
-        V[:, :, t] = v
-        S[:, :, t] = spikes
+        v_hist = v_hist + (v,)
+        s_hist = s_hist + (spikes,)
+
+    V = torch.stack(v_hist, dim=2)
+    S = torch.stack(s_hist, dim=2)
     return V, S
 
 
@@ -99,5 +85,6 @@ class LIFCell(nn.Module):
         self.surrogate = surrogate
         self.slope = slope
 
+    @torch.jit.export
     def forward(self, v: Tensor, I: Tensor) -> Tuple[Tensor, Tensor]:
         return lif_dynamics(v, I, self.params, surrogate=self.surrogate, slope=self.slope)

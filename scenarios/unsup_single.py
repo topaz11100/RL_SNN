@@ -41,76 +41,77 @@ def _gather_events(
     valid_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
-    _, n_pre, _ = pre_spikes.shape
+    batch_size, n_pre, T = pre_spikes.shape
     n_post = post_spikes.shape[1]
+
     pad_pre = F.pad(pre_spikes, (L - 1, 0))
     pad_post = F.pad(post_spikes, (L - 1, 0))
-    idx_range = torch.arange(L, device=device)
+    pre_windows = pad_pre.unfold(2, L, 1)
+    post_windows = pad_post.unfold(2, L, 1)
+    post_windows_t = post_windows.permute(0, 2, 1, 3)
 
-    histories, extras = [], []
-    pre_indices, post_indices, batch_indices = [], [], []
+    batch_grid = (
+        torch.arange(batch_size, device=device)
+        .view(batch_size, 1, 1, 1)
+        .expand(batch_size, n_pre, T, n_post)
+        .reshape(-1)
+    )
+    pre_grid = (
+        torch.arange(n_pre, device=device)
+        .view(1, n_pre, 1, 1)
+        .expand(batch_size, n_pre, T, n_post)
+        .reshape(-1)
+    )
+    post_grid = (
+        torch.arange(n_post, device=device)
+        .view(1, 1, 1, n_post)
+        .expand(batch_size, n_pre, T, n_post)
+        .reshape(-1)
+    )
 
-    def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
-        indices = (spike_tensor == 1).nonzero(as_tuple=False)
-        if indices.numel() == 0:
-            return
-        base_batch = indices[:, 0]
-        base_idx = indices[:, 1]
-        time_idx = indices[:, 2]
+    pre_mask = pre_spikes.bool().unsqueeze(3).expand(-1, -1, -1, n_post)
+    if valid_mask is not None:
+        pre_mask = pre_mask & valid_mask.view(1, n_pre, 1, n_post)
+    pre_mask_flat = pre_mask.reshape(-1)
+    pre_indices = pre_mask_flat.nonzero(as_tuple=False).squeeze(1)
 
-        if is_pre_event:
-            batch_idx = base_batch.repeat_interleave(n_post)
-            pre_idx = base_idx.repeat_interleave(n_post)
-            post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
-            e_type = torch.tensor([1.0, 0.0], device=device)
-            repeat_count = n_post
-        else:
-            batch_idx = base_batch.repeat_interleave(n_pre)
-            post_idx = base_idx.repeat_interleave(n_pre)
-            pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
-            e_type = torch.tensor([0.0, 1.0], device=device)
-            repeat_count = n_pre
+    pre_windows_exp = pre_windows.unsqueeze(3).expand(-1, -1, -1, n_post, -1).reshape(-1, L)
+    post_windows_exp = post_windows_t.unsqueeze(1).expand(-1, n_pre, -1, -1, -1).reshape(-1, L)
 
-        time_idx = time_idx.repeat_interleave(repeat_count)
-        if valid_mask is not None:
-            mask_flat = valid_mask[pre_idx, post_idx] > 0.5
-            if mask_flat.sum() == 0:
-                return
-            batch_idx = batch_idx[mask_flat]
-            pre_idx = pre_idx[mask_flat]
-            post_idx = post_idx[mask_flat]
-            time_idx = time_idx[mask_flat]
+    pre_histories = pre_windows_exp.index_select(0, pre_indices)
+    post_histories = post_windows_exp.index_select(0, pre_indices)
+    histories_pre = torch.stack([pre_histories, post_histories], dim=1)
 
-        pos = time_idx + (L - 1)
-        time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
-        pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
-        post_hist = pad_post[batch_idx.unsqueeze(1), post_idx.unsqueeze(1), time_indices]
+    batch_pre = batch_grid.index_select(0, pre_indices)
+    pre_idx = pre_grid.index_select(0, pre_indices)
+    post_idx = post_grid.index_select(0, pre_indices)
+    weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
+    event_type_pre = torch.tensor([1.0, 0.0], device=device, dtype=weights.dtype).expand(weights_pre.size(0), -1)
+    extras_pre = torch.cat([weights_pre, event_type_pre], dim=1)
 
-        histories.append(torch.stack([pre_hist, post_hist], dim=1))
-        w_vals = weights[pre_idx, post_idx].unsqueeze(1)
-        extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
-        pre_indices.append(pre_idx)
-        post_indices.append(post_idx)
-        batch_indices.append(batch_idx)
+    post_mask = post_spikes.bool().permute(0, 2, 1).unsqueeze(1).expand(-1, n_pre, -1, -1)
+    if valid_mask is not None:
+        post_mask = post_mask & valid_mask.view(1, n_pre, 1, n_post)
+    post_mask_flat = post_mask.reshape(-1)
+    post_indices = post_mask_flat.nonzero(as_tuple=False).squeeze(1)
 
-    _append_events(pre_spikes, True)
-    _append_events(post_spikes, False)
+    pre_histories_post = pre_windows_exp.index_select(0, post_indices)
+    post_histories_post = post_windows_exp.index_select(0, post_indices)
+    histories_post = torch.stack([pre_histories_post, post_histories_post], dim=1)
 
-    if not histories:
-        return (
-            torch.empty(0, 2, L, device=device),
-            torch.empty(0, 3, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-        )
+    batch_post = batch_grid.index_select(0, post_indices)
+    pre_idx_post = pre_grid.index_select(0, post_indices)
+    post_idx_post = post_grid.index_select(0, post_indices)
+    weights_post = weights[pre_idx_post, post_idx_post].unsqueeze(1)
+    event_type_post = torch.tensor([0.0, 1.0], device=device, dtype=weights.dtype).expand(weights_post.size(0), -1)
+    extras_post = torch.cat([weights_post, event_type_post], dim=1)
 
     return (
-        torch.cat(histories, dim=0),
-        torch.cat(extras, dim=0),
-        torch.cat(pre_indices, dim=0),
-        torch.cat(post_indices, dim=0),
-        torch.cat(batch_indices, dim=0),
+        torch.cat([histories_pre, histories_post], dim=0),
+        torch.cat([extras_pre, extras_post], dim=0),
+        torch.cat([pre_idx, pre_idx_post], dim=0),
+        torch.cat([post_idx, post_idx_post], dim=0),
+        torch.cat([batch_pre, batch_post], dim=0),
     )
 
 

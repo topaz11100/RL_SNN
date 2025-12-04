@@ -28,6 +28,7 @@ class SemiSupervisedNetwork(nn.Module):
         self.hidden_cell = LIFCell(self.hidden_params, surrogate=False)
         self.output_cell = LIFCell(self.output_params, surrogate=False)
 
+    @torch.jit.export
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Simulate hidden and output LIF layers for encoded input.
 
@@ -42,17 +43,16 @@ class SemiSupervisedNetwork(nn.Module):
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
         batch_size, _, T = input_spikes.shape
-        device = input_spikes.device
         dtype = input_spikes.dtype
 
-        hidden_spikes = torch.zeros((batch_size, self.n_hidden, T), device=device, dtype=dtype)
-        output_spikes = torch.zeros((batch_size, self.n_output, T), device=device, dtype=dtype)
-
-        v_hidden = torch.full((batch_size, self.n_hidden), self.hidden_params.v_rest, device=device, dtype=dtype)
-        v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
+        v_hidden = torch.full((batch_size, self.n_hidden), self.hidden_params.v_rest, device=input_spikes.device, dtype=dtype)
+        v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=input_spikes.device, dtype=dtype)
 
         s_hidden_prev = torch.zeros_like(v_hidden)
         s_output_prev = torch.zeros_like(v_output)
+
+        hidden_hist: Tuple[Tensor, ...] = ()
+        output_hist: Tuple[Tensor, ...] = ()
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
@@ -62,11 +62,14 @@ class SemiSupervisedNetwork(nn.Module):
             I_output = torch.matmul(s_hidden_prev, torch.relu(self.w_hidden_output))
             v_output, s_output = self.output_cell(v_output, I_output)
 
-            hidden_spikes[:, :, t] = s_hidden
-            output_spikes[:, :, t] = s_output
+            hidden_hist = hidden_hist + (s_hidden,)
+            output_hist = output_hist + (s_output,)
 
             s_hidden_prev = s_hidden
             s_output_prev = s_output
+
+        hidden_spikes = torch.stack(hidden_hist, dim=2)
+        output_spikes = torch.stack(output_hist, dim=2)
 
         firing_rates = output_spikes.mean(dim=2)
         return hidden_spikes, output_spikes, firing_rates
