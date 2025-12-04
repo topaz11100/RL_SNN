@@ -48,7 +48,7 @@
   - **Theory 연계**: 막전위 업데이트 식 `v[t+1] = v[t] + (-(v[t]-v_rest)+R*I_syn)*dt/tau`를 정의하는 상수.
 - `lif_dynamics(v: Tensor, I: Tensor, params: LIFParams, surrogate: bool = False, slope: float = 5.0) -> Tuple[Tensor, Tensor]`
   - **인수**: 현재 막전위 `v`, 시냅스 전류 `I`, 파라미터 `params`, surrogate 사용 여부와 시그모이드 기울기 `slope`.
-  - **역할**: `Theory.md` 2.2절 수식에 따라 막전위를 적분하고, 업데이트된 막전위 기준으로 hard/surrogate 스파이크를 생성한 뒤 detach 기반 리셋을 적용한다.
+- **역할**: `Theory.md` 2.2절 수식에 따라 막전위를 적분하고, 업데이트된 막전위 기준으로 hard/surrogate 스파이크를 생성한 뒤 detach 기반 리셋을 적용한다. 모든 단계는 out-of-place로 계산해 `torch.func.vmap`과 같은 함수형 변환에서도 상태 공유가 일어나지 않는다.
   - **출력**: `(v_next, spikes)`.
   - **Theory 연계**: 공통 LIF 동역학 구현부로 모든 네트워크가 공유하는 단일 소스.
 - `lif_step(v: Tensor, I_syn: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]`
@@ -78,7 +78,7 @@
   - **Theory 연계**: 시나리오 1.x의 Diehl–Cook E/I 구조 정의.
 - `forward(input_spikes: Tensor) -> Tuple[Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: T 스텝 동안 E/I 층 막전위와 스파이크를 순차적으로 업데이트하여 흥분/억제 스파이크열을 반환.
+- **역할**: T 스텝 동안 E/I 층 막전위와 스파이크를 순차적으로 업데이트하여 흥분/억제 스파이크열을 반환. 변하지 않는 억제→흥분 마스크는 루프 외부에서 한 번만 적용해 타임스텝 반복 시의 불필요한 연산을 줄였다.
   - **출력**: `(exc_spikes, inh_spikes)`.
   - **Theory 연계**: `Theory.md` 2.3절의 E/I 순환 및 억제 피드백 구현.
 
@@ -98,7 +98,7 @@
   - **Theory 연계**: `Theory.md` 6.4절의 gradient mimicry 실험 네트워크.
 - `forward(input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 스파이크를 **리스트에 수집한 뒤 `torch.stack`**으로 텐서화해 `vmap` 등 함수형 변환과 호환되도록 한다. 은닉층이 없을 때는 빈 리스트와 출력 스파이크만 반환한다.
+- **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 스파이크를 **리스트에 수집한 뒤 `torch.stack`**으로 텐서화해 `vmap` 등 함수형 변환과 호환되도록 한다. 은닉층이 없을 때는 빈 리스트와 출력 스파이크만 반환한다. 각 타임스텝은 새로운 막전위/스파이크 텐서를 생성해 상태를 갱신하므로 in-place 연산 없이 함수형 추적이 가능하다.
   - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`로 각 층/출력의 스파이크열과 평균 발화율.
   - **Theory 연계**: Teacher gradient 계산과 에이전트 시뮬레이션을 위한 differentiable forward.
 
@@ -161,6 +161,7 @@
 - `run_unsup1(args, logger)`
   - **역할**: MNIST 로딩, Poisson 인코딩, Diehl–Cook 네트워크 시뮬레이션, 이벤트별 로컬 상태(전/후 스파이크 히스토리, 현재 가중치, 이벤트 타입) 수집, per-image 안정성 보상(데이터셋 인덱스 기반 winner 추적 포함)과 희소성/다양성 보상 합산, 에피소드 버퍼 병합 후 PPO 업데이트, 메트릭 로깅까지 한 에포크 루프 수행.
   - **세부 구현**: 에포크 루프 시작 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출을 `Δw = args.local_lr * s_scen * action` 구조로 적용해 `AGENTS.md` 5.3.2절의 로컬 학습률 수식을 명시적으로 따른다.
+  - **최적화**: 보상과 발화율 통계를 GPU 텐서로 누적하고 에포크 종료 시 한 번만 CPU로 이동시켜 평균을 계산해 배치 단위 동기화를 줄였다.
   - **출력**: 없음(로그/파일 기록).
   - **Theory 연계**: 시나리오 1.1 전체 학습 흐름 구현.
 
@@ -170,6 +171,7 @@
 - `run_unsup2(args, logger)`
   - **역할**: 두 정책(흥분/억제)으로 Poisson 인코딩된 배치를 처리하고, 전/후 스파이크 히스토리·가중치·이벤트 타입으로 구성한 로컬 상태를 이벤트별로 수집한다. 각 이미지에 대해 희소성/다양성/안정성 보상을 계산해 에피소드 버퍼에 채운 뒤, 미니배치 전체를 대상으로 PPO 업데이트를 수행하며 메트릭을 기록한다.
   - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 설정하고, 흥분/억제 경로 모두 `_scatter_updates`에 `args.local_lr * s_scen * action`을 전달해 로컬 업데이트가 문서상의 `η_w * s_scen * Δd_i(t)` 형식을 유지한다.
+  - **최적화**: 보상/발화 통계를 GPU 텐서로 유지하고 delta_t/delta_d 히스토리 역시 에포크 종료 시점에만 CPU로 옮겨 기록해 배치마다의 동기화를 제거했다.
   - **Theory 연계**: 시나리오 1.2의 분리된 정책 학습 파이프라인.
 
 ### scenarios/semi_supervised.py
@@ -184,6 +186,7 @@
 - `run_semi(args, logger)`
   - **역할**: Poisson 인코딩된 MNIST와 라벨을 사용해 네트워크 시뮬레이션, 출력 이벤트별 로컬 상태(히스토리+가중치+이벤트 타입)를 통해 행동을 산출하고 가중치를 개별적으로 업데이트한다. 각 이미지의 분류 보상을 에피소드 버퍼에 담아 미니배치 단위로 PPO를 업데이트하며 train/val/test 메트릭을 기록한다.
   - **세부 구현**: 에포크 시작에 `s_scen = 1.0`을 선언하고 입력/은닉→출력 경로 모두 `_scatter_updates` 호출을 `args.local_lr * s_scen * action` 형태로 통일해 로컬 학습률 수식을 충족하며, 각 업데이트 후 가중치를 지정 범위로 클리핑한다.
+  - **최적화**: 정확도·마진·보상을 GPU 텐서로 누적한 뒤 에포크 종료 시 집계해 CPU 동기화 비용을 최소화한다.
   - **Theory 연계**: 시나리오 2 학습 루프.
 
 ### scenarios/grad_mimicry.py
@@ -194,6 +197,7 @@
 - `run_grad(args, logger)`
   - **역할**: Poisson 인코딩된 MNIST를 입력으로 에이전트/Teacher 네트워크를 모두 시뮬레이션하고, 입력→은닉/은닉→출력 이벤트별 로컬 상태(히스토리, 현재 가중치, 정규화된 레이어 인덱스, 이벤트 타입)를 통해 Δd를 산출해 각 시냅스에 개별적으로 적용한다. 에피소드 동안 누적된 에이전트 업데이트 `Δw_agent`와 Teacher 업데이트 `Δw_teacher` 간 제곱 오차 평균을 보상으로 사용하며, 이미지 미니배치 단위로 PPO Actor–Critic을 학습한다.
   - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다.
+  - **최적화**: vmap 호환을 위해 forward에서 in-place 상태 갱신을 제거하고, 보상·정렬 통계 및 델타 히스토리를 GPU에 유지한 채 에포크 종료 후에만 CPU로 이동해 로그/시각화를 수행한다.
   - **Theory 연계**: 시나리오 3의 gradient mimicry 학습 루프.
 
 ## main.py

@@ -195,8 +195,8 @@ def run_semi(args, logger):
             hidden_spikes, output_spikes, firing_rates = network(input_spikes)
 
             preds = firing_rates.argmax(dim=1)
-            batch_acc = (preds == labels).float().mean().item()
-            epoch_acc.append(batch_acc)
+            batch_acc_tensor = (preds == labels).float().mean()
+            epoch_acc.append(batch_acc_tensor.detach())
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
@@ -249,11 +249,11 @@ def run_semi(args, logger):
                         _scatter_updates(delta[out_mask], pre_idx[out_mask], post_idx[out_mask], network.w_hidden_output)
                         network.w_hidden_output.clamp_(args.exc_clip_min, args.exc_clip_max)
 
-                delta_t_values.append(_extract_delta_t(states).detach().cpu())
-                delta_d_values.append(actions.detach().cpu())
+                delta_t_values.append(_extract_delta_t(states).detach())
+                delta_d_values.append(actions.detach())
 
-            epoch_margin.append(r_margin.mean().item())
-            epoch_reward.append(r_total.mean().item())
+            epoch_margin.append(r_margin.detach())
+            epoch_reward.append(r_total.detach())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -262,12 +262,18 @@ def run_semi(args, logger):
                     args.num_epochs,
                     batch_idx,
                     len(train_loader),
-                    batch_acc,
+                    batch_acc_tensor.item(),
                 )
 
-        mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0
-        mean_margin = sum(epoch_margin) / len(epoch_margin) if epoch_margin else 0.0
-        mean_reward = sum(epoch_reward) / len(epoch_reward) if epoch_reward else 0.0
+        mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
+        margin_tensor = (
+            torch.cat([m.reshape(-1) for m in epoch_margin]) if epoch_margin else torch.empty(0, device=device)
+        )
+        reward_tensor = (
+            torch.cat([r.reshape(-1) for r in epoch_reward]) if epoch_reward else torch.empty(0, device=device)
+        )
+        mean_margin = margin_tensor.mean().item() if margin_tensor.numel() > 0 else 0.0
+        mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
 
         val_acc, val_margin, val_reward = _evaluate(network, val_loader, device, args)
         test_acc, test_margin, test_reward = _evaluate(network, test_loader, device, args)
@@ -290,8 +296,8 @@ def run_semi(args, logger):
                 test_acc,
             )
 
-    delta_t_concat = torch.cat(delta_t_values, dim=0) if delta_t_values else torch.empty(0)
-    delta_d_concat = torch.cat(delta_d_values, dim=0) if delta_d_values else torch.empty(0)
+    delta_t_concat = torch.cat(delta_t_values, dim=0).cpu() if delta_t_values else torch.empty(0)
+    delta_d_concat = torch.cat(delta_d_values, dim=0).cpu() if delta_d_values else torch.empty(0)
     if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
         plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
 

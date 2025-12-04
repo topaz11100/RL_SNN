@@ -56,7 +56,10 @@ class GradMimicryNetwork(nn.Module):
         hidden_spikes_list: List[List[Tensor]] = [[] for _ in range(n_hidden_layers)]
         output_spikes_list: List[Tensor] = []
 
-        v_states = [torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype) for h in self.hidden_sizes]
+        v_states = [
+            torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype)
+            for h in self.hidden_sizes
+        ]
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
 
         if n_hidden_layers == 0:
@@ -76,10 +79,10 @@ class GradMimicryNetwork(nn.Module):
             x_t = input_spikes[:, :, t]
 
             current = torch.matmul(x_t, torch.relu(self.w_layers[0]))
-            v_first, s_first = self.hidden_cell(v_states[0], current)
+            v_first_next, s_first = self.hidden_cell(v_states[0], current)
             hidden_spikes_list[0].append(s_first)
 
-            new_v_states = [v_first]
+            new_v_states = [v_first_next]
             new_s_prev = [s_first]
 
             for li in range(1, n_hidden_layers):
@@ -91,11 +94,12 @@ class GradMimicryNetwork(nn.Module):
 
             prev_spikes_for_output = s_prev[-1]
             current_out = torch.matmul(prev_spikes_for_output, torch.relu(self.w_layers[-1]))
-            v_output, s_output = self.output_cell(v_output, current_out)
+            v_output_next, s_output = self.output_cell(v_output, current_out)
             output_spikes_list.append(s_output)
 
             v_states = new_v_states
             s_prev = new_s_prev
+            v_output = v_output_next
 
         hidden_spikes = [torch.stack(s_list, dim=2) for s_list in hidden_spikes_list]
         output_spikes = torch.stack(output_spikes_list, dim=2)
