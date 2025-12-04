@@ -3,7 +3,48 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFCell, LIFParams
+from snn.lif import LIFParams, lif_step_script
+
+
+@torch.jit.script
+def _semi_supervised_forward_script(
+    input_spikes: Tensor,
+    w_input_hidden: Tensor,
+    w_hidden_output: Tensor,
+    hidden_params: LIFParams,
+    output_params: LIFParams,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    batch_size, _, T = input_spikes.shape
+    dtype = input_spikes.dtype
+
+    v_hidden = torch.full((batch_size, w_input_hidden.size(1)), hidden_params.v_rest, device=input_spikes.device, dtype=dtype)
+    v_output = torch.full((batch_size, w_hidden_output.size(1)), output_params.v_rest, device=input_spikes.device, dtype=dtype)
+
+    s_hidden_prev = torch.zeros_like(v_hidden)
+    s_output_prev = torch.zeros_like(v_output)
+
+    hidden_hist: Tuple[Tensor, ...] = ()
+    output_hist: Tuple[Tensor, ...] = ()
+
+    for t in range(T):
+        x_t = input_spikes[:, :, t]
+        I_hidden = torch.matmul(x_t, torch.relu(w_input_hidden))
+        v_hidden, s_hidden = lif_step_script(v_hidden, I_hidden, hidden_params)
+
+        I_output = torch.matmul(s_hidden_prev, torch.relu(w_hidden_output))
+        v_output, s_output = lif_step_script(v_output, I_output, output_params)
+
+        hidden_hist = hidden_hist + (s_hidden,)
+        output_hist = output_hist + (s_output,)
+
+        s_hidden_prev = s_hidden
+        s_output_prev = s_output
+
+    hidden_spikes = torch.stack(hidden_hist, dim=2)
+    output_spikes = torch.stack(output_hist, dim=2)
+
+    firing_rates = output_spikes.mean(dim=2)
+    return hidden_spikes, output_spikes, firing_rates
 
 
 class SemiSupervisedNetwork(nn.Module):
@@ -25,51 +66,17 @@ class SemiSupervisedNetwork(nn.Module):
         self.w_input_hidden = nn.Parameter(torch.rand(n_input, n_hidden) * 0.1)
         self.w_hidden_output = nn.Parameter(torch.rand(n_hidden, n_output) * 0.1)
 
-        self.hidden_cell = LIFCell(self.hidden_params, surrogate=False)
-        self.output_cell = LIFCell(self.output_params, surrogate=False)
-
     @torch.jit.export
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        """Simulate hidden and output LIF layers for encoded input.
-
-        Args:
-            input_spikes: Tensor of shape (batch, 784, T)
-
-        Returns:
-            hidden_spikes: Tensor of shape (batch, n_hidden, T)
-            output_spikes: Tensor of shape (batch, n_output, T)
-            firing_rates: Tensor of shape (batch, n_output) averaged over time
-        """
+        """Simulate hidden and output LIF layers for encoded input."""
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
-        batch_size, _, T = input_spikes.shape
-        dtype = input_spikes.dtype
 
-        v_hidden = torch.full((batch_size, self.n_hidden), self.hidden_params.v_rest, device=input_spikes.device, dtype=dtype)
-        v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=input_spikes.device, dtype=dtype)
-
-        s_hidden_prev = torch.zeros_like(v_hidden)
-        s_output_prev = torch.zeros_like(v_output)
-
-        hidden_hist: Tuple[Tensor, ...] = ()
-        output_hist: Tuple[Tensor, ...] = ()
-
-        for t in range(T):
-            x_t = input_spikes[:, :, t]
-            I_hidden = torch.matmul(x_t, torch.relu(self.w_input_hidden))
-            v_hidden, s_hidden = self.hidden_cell(v_hidden, I_hidden)
-
-            I_output = torch.matmul(s_hidden_prev, torch.relu(self.w_hidden_output))
-            v_output, s_output = self.output_cell(v_output, I_output)
-
-            hidden_hist = hidden_hist + (s_hidden,)
-            output_hist = output_hist + (s_output,)
-
-            s_hidden_prev = s_hidden
-            s_output_prev = s_output
-
-        hidden_spikes = torch.stack(hidden_hist, dim=2)
-        output_spikes = torch.stack(output_hist, dim=2)
-
-        firing_rates = output_spikes.mean(dim=2)
-        return hidden_spikes, output_spikes, firing_rates
+        # Optimized: use scripted functional core for fused time-loop on GPU/CPU.
+        return _semi_supervised_forward_script(
+            input_spikes,
+            self.w_input_hidden,
+            self.w_hidden_output,
+            self.hidden_params,
+            self.output_params,
+        )

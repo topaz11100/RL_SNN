@@ -3,7 +3,51 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFCell, LIFParams
+from snn.lif import LIFParams, lif_step_script
+
+
+@torch.jit.script
+def _diehl_cook_forward_script(
+    input_spikes: Tensor,
+    w_input_exc: Tensor,
+    w_inh_exc: Tensor,
+    exc_params: LIFParams,
+    inh_params: LIFParams,
+    weight_ei: float,
+    inh_exc_mask: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    batch_size, _, T = input_spikes.shape
+    dtype = input_spikes.dtype
+
+    v_exc = torch.full((batch_size, w_input_exc.size(1)), exc_params.v_rest, device=input_spikes.device, dtype=dtype)
+    v_inh = torch.full((batch_size, w_inh_exc.size(0)), inh_params.v_rest, device=input_spikes.device, dtype=dtype)
+
+    s_exc_prev = torch.zeros_like(v_exc)
+    s_inh_prev = torch.zeros_like(v_inh)
+
+    exc_hist: Tuple[Tensor, ...] = ()
+    inh_hist: Tuple[Tensor, ...] = ()
+
+    for t in range(T):
+        x_t = input_spikes[:, :, t]
+        # Fix: enforce inhibitory mask every step to prevent self-inhibition during training.
+        w_inh_exc_masked = torch.relu(w_inh_exc) * inh_exc_mask
+        I_exc = torch.matmul(x_t, torch.relu(w_input_exc)) - torch.matmul(s_inh_prev, w_inh_exc_masked)
+        v_exc, s_exc = lif_step_script(v_exc, I_exc, exc_params)
+
+        I_inh = weight_ei * s_exc_prev
+        v_inh, s_inh = lif_step_script(v_inh, I_inh, inh_params)
+
+        exc_hist = exc_hist + (s_exc,)
+        inh_hist = inh_hist + (s_inh,)
+
+        s_exc_prev = s_exc
+        s_inh_prev = s_inh
+
+    exc_spikes = torch.stack(exc_hist, dim=2)
+    inh_spikes = torch.stack(inh_hist, dim=2)
+
+    return exc_spikes, inh_spikes
 
 
 class DiehlCookNetwork(nn.Module):
@@ -33,50 +77,19 @@ class DiehlCookNetwork(nn.Module):
         with torch.no_grad():
             self.w_inh_exc.mul_(self.inh_exc_mask)
 
-        self.exc_cell = LIFCell(self.exc_params, surrogate=False)
-        self.inh_cell = LIFCell(self.inh_params, surrogate=False)
-
     @torch.jit.export
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
-        """Simulate the E/I network for given input spike trains.
-
-        Args:
-            input_spikes: Tensor of shape (batch, 784, T)
-
-        Returns:
-            exc_spikes: Tensor of shape (batch, n_exc, T)
-            inh_spikes: Tensor of shape (batch, n_inh, T)
-        """
+        """Simulate the E/I network for given input spike trains."""
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
-        batch_size, _, T = input_spikes.shape
-        dtype = input_spikes.dtype
 
-        v_exc = torch.full((batch_size, self.n_exc), self.exc_params.v_rest, device=input_spikes.device, dtype=dtype)
-        v_inh = torch.full((batch_size, self.n_inh), self.inh_params.v_rest, device=input_spikes.device, dtype=dtype)
-
-        s_exc_prev = torch.zeros_like(v_exc)
-        s_inh_prev = torch.zeros_like(v_inh)
-
-        exc_hist: Tuple[Tensor, ...] = ()
-        inh_hist: Tuple[Tensor, ...] = ()
-
-        for t in range(T):
-            x_t = input_spikes[:, :, t]
-            w_inh_exc = torch.relu(self.w_inh_exc) * self.inh_exc_mask
-            I_exc = torch.matmul(x_t, torch.relu(self.w_input_exc)) - torch.matmul(s_inh_prev, w_inh_exc)
-            v_exc, s_exc = self.exc_cell(v_exc, I_exc)
-
-            I_inh = self.weight_ei * s_exc_prev
-            v_inh, s_inh = self.inh_cell(v_inh, I_inh)
-
-            exc_hist = exc_hist + (s_exc,)
-            inh_hist = inh_hist + (s_inh,)
-
-            s_exc_prev = s_exc
-            s_inh_prev = s_inh
-
-        exc_spikes = torch.stack(exc_hist, dim=2)
-        inh_spikes = torch.stack(inh_hist, dim=2)
-
-        return exc_spikes, inh_spikes
+        # Optimized: use scripted functional core for fused time-loop on GPU/CPU.
+        return _diehl_cook_forward_script(
+            input_spikes,
+            self.w_input_exc,
+            self.w_inh_exc,
+            self.exc_params,
+            self.inh_params,
+            self.weight_ei,
+            self.inh_exc_mask,
+        )

@@ -1,13 +1,4 @@
 import os
-import os
-from typing import Optional, Tuple
-
-import torch
-import torch.nn.functional as F
-
-from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
-from data.mnist import get_mnist_dataloaders
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -57,70 +48,82 @@ def _gather_events(
     pad_post = F.pad(post_spikes, (L - 1, 0))
     pre_windows = pad_pre.unfold(2, L, 1)
     post_windows = pad_post.unfold(2, L, 1)
-    post_windows_t = post_windows.permute(0, 2, 1, 3)
 
-    batch_grid = (
-        torch.arange(batch_size, device=device)
-        .view(batch_size, 1, 1, 1)
-        .expand(batch_size, n_pre, T, n_post)
-        .reshape(-1)
-    )
-    pre_grid = (
-        torch.arange(n_pre, device=device)
-        .view(1, n_pre, 1, 1)
-        .expand(batch_size, n_pre, T, n_post)
-        .reshape(-1)
-    )
-    post_grid = (
-        torch.arange(n_post, device=device)
-        .view(1, 1, 1, n_post)
-        .expand(batch_size, n_pre, T, n_post)
-        .reshape(-1)
-    )
+    states_list = []
+    extras_list = []
+    pre_indices_list = []
+    post_indices_list = []
+    batch_indices_list = []
 
-    pre_mask = pre_spikes.bool().unsqueeze(3).expand(-1, -1, -1, n_post)
-    if valid_mask is not None:
-        pre_mask = pre_mask & valid_mask.view(1, n_pre, 1, n_post)
-    pre_mask_flat = pre_mask.reshape(-1)
-    pre_indices = pre_mask_flat.nonzero(as_tuple=False).squeeze(1)
+    # Optimized: build events only for real spikes to avoid large expanded tensors.
+    pre_events = pre_spikes.nonzero(as_tuple=False)
+    if pre_events.numel() > 0:
+        batch_pre = pre_events[:, 0].repeat_interleave(n_post)
+        pre_idx = pre_events[:, 1].repeat_interleave(n_post)
+        time_idx = pre_events[:, 2].repeat_interleave(n_post)
+        post_idx = torch.arange(n_post, device=device).repeat(pre_events.size(0))
 
-    pre_windows_exp = pre_windows.unsqueeze(3).expand(-1, -1, -1, n_post, -1).reshape(-1, L)
-    post_windows_exp = post_windows_t.unsqueeze(1).expand(-1, n_pre, -1, -1, -1).reshape(-1, L)
+        if valid_mask is not None:
+            keep_mask = valid_mask[pre_idx, post_idx]
+            keep = keep_mask.nonzero(as_tuple=False).squeeze(1)
+            batch_pre = batch_pre.index_select(0, keep)
+            pre_idx = pre_idx.index_select(0, keep)
+            time_idx = time_idx.index_select(0, keep)
+            post_idx = post_idx.index_select(0, keep)
 
-    pre_histories = pre_windows_exp.index_select(0, pre_indices)
-    post_histories = post_windows_exp.index_select(0, pre_indices)
-    histories_pre = torch.stack([pre_histories, post_histories], dim=1)
+        if pre_idx.numel() > 0:
+            pre_hist = pre_windows[batch_pre, pre_idx, time_idx]
+            post_hist = post_windows[batch_pre, post_idx, time_idx]
+            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
 
-    batch_pre = batch_grid.index_select(0, pre_indices)
-    pre_idx = pre_grid.index_select(0, pre_indices)
-    post_idx = post_grid.index_select(0, pre_indices)
-    weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
-    event_type_pre = torch.tensor([1.0, 0.0], device=device, dtype=weights.dtype).expand(weights_pre.size(0), -1)
-    extras_pre = torch.cat([weights_pre, event_type_pre], dim=1)
+            weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
+            event_type = torch.tensor([1.0, 0.0], device=device, dtype=weights.dtype).expand(weights_pre.size(0), -1)
+            extras_list.append(torch.cat([weights_pre, event_type], dim=1))
 
-    post_mask = post_spikes.bool().permute(0, 2, 1).unsqueeze(1).expand(-1, n_pre, -1, -1)
-    if valid_mask is not None:
-        post_mask = post_mask & valid_mask.view(1, n_pre, 1, n_post)
-    post_mask_flat = post_mask.reshape(-1)
-    post_indices = post_mask_flat.nonzero(as_tuple=False).squeeze(1)
+            pre_indices_list.append(pre_idx)
+            post_indices_list.append(post_idx)
+            batch_indices_list.append(batch_pre)
 
-    pre_histories_post = pre_windows_exp.index_select(0, post_indices)
-    post_histories_post = post_windows_exp.index_select(0, post_indices)
-    histories_post = torch.stack([pre_histories_post, post_histories_post], dim=1)
+    post_events = post_spikes.nonzero(as_tuple=False)
+    if post_events.numel() > 0:
+        batch_post = post_events[:, 0].repeat_interleave(n_pre)
+        post_idx = post_events[:, 1].repeat_interleave(n_pre)
+        time_idx = post_events[:, 2].repeat_interleave(n_pre)
+        pre_idx = torch.arange(n_pre, device=device).repeat(post_events.size(0))
 
-    batch_post = batch_grid.index_select(0, post_indices)
-    pre_idx_post = pre_grid.index_select(0, post_indices)
-    post_idx_post = post_grid.index_select(0, post_indices)
-    weights_post = weights[pre_idx_post, post_idx_post].unsqueeze(1)
-    event_type_post = torch.tensor([0.0, 1.0], device=device, dtype=weights.dtype).expand(weights_post.size(0), -1)
-    extras_post = torch.cat([weights_post, event_type_post], dim=1)
+        if valid_mask is not None:
+            keep_mask = valid_mask[pre_idx, post_idx]
+            keep = keep_mask.nonzero(as_tuple=False).squeeze(1)
+            batch_post = batch_post.index_select(0, keep)
+            pre_idx = pre_idx.index_select(0, keep)
+            time_idx = time_idx.index_select(0, keep)
+            post_idx = post_idx.index_select(0, keep)
+
+        if pre_idx.numel() > 0:
+            pre_hist = pre_windows[batch_post, pre_idx, time_idx]
+            post_hist = post_windows[batch_post, post_idx, time_idx]
+            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
+
+            weights_post = weights[pre_idx, post_idx].unsqueeze(1)
+            event_type = torch.tensor([0.0, 1.0], device=device, dtype=weights.dtype).expand(weights_post.size(0), -1)
+            extras_list.append(torch.cat([weights_post, event_type], dim=1))
+
+            pre_indices_list.append(pre_idx)
+            post_indices_list.append(post_idx)
+            batch_indices_list.append(batch_post)
+
+    if not states_list:
+        empty_state = torch.empty((0, 2, L), device=device, dtype=pre_spikes.dtype)
+        empty_extras = torch.empty((0, 3), device=device, dtype=weights.dtype)
+        empty_index = torch.empty((0,), device=device, dtype=torch.long)
+        return empty_state, empty_extras, empty_index, empty_index, empty_index
 
     return (
-        torch.cat([histories_pre, histories_post], dim=0),
-        torch.cat([extras_pre, extras_post], dim=0),
-        torch.cat([pre_idx, pre_idx_post], dim=0),
-        torch.cat([post_idx, post_idx_post], dim=0),
-        torch.cat([batch_pre, batch_post], dim=0),
+        torch.cat(states_list, dim=0),
+        torch.cat(extras_list, dim=0),
+        torch.cat(pre_indices_list, dim=0),
+        torch.cat(post_indices_list, dim=0),
+        torch.cat(batch_indices_list, dim=0),
     )
 
 
@@ -177,10 +180,12 @@ def run_unsup2(args, logger):
 
     actor_exc = GaussianPolicy(sigma=args.sigma_unsup2, extra_feature_dim=3).to(device)
     actor_inh = GaussianPolicy(sigma=args.sigma_unsup2, extra_feature_dim=3).to(device)
-    critic = ValueFunction(extra_feature_dim=3).to(device)
+    critic_exc = ValueFunction(extra_feature_dim=3).to(device)
+    critic_inh = ValueFunction(extra_feature_dim=3).to(device)
     optimizer_actor_exc = torch.optim.Adam(actor_exc.parameters(), lr=args.lr_actor)
     optimizer_actor_inh = torch.optim.Adam(actor_inh.parameters(), lr=args.lr_actor)
-    optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
+    optimizer_critic_exc = torch.optim.Adam(critic_exc.parameters(), lr=args.lr_critic)
+    optimizer_critic_inh = torch.optim.Adam(critic_inh.parameters(), lr=args.lr_critic)
 
     w_input_exc_before = network.w_input_exc.detach().cpu().clone()
     w_inh_exc_before = network.w_inh_exc.detach().cpu().clone()
@@ -270,13 +275,13 @@ def run_unsup2(args, logger):
                     pre_exc_events = pre_idx[exc_mask]
                     post_exc_events = post_idx[exc_mask]
                     actions_exc, logp_exc, _ = actor_exc(states_exc, extras_exc)
-                    values_exc = critic(states_exc, extras_exc)
+                    values_exc = critic_exc(states_exc, extras_exc)
                     returns_exc = rewards_tensor[batch_exc_events]
                     adv_exc = returns_exc - values_exc.detach()
 
                     ppo_update_events(
                         actor_exc,
-                        critic,
+                        critic_exc,
                         states_exc,
                         extras_exc,
                         actions_exc.detach(),
@@ -284,7 +289,7 @@ def run_unsup2(args, logger):
                         returns_exc.detach(),
                         adv_exc.detach(),
                         optimizer_actor_exc,
-                        optimizer_critic,
+                        optimizer_critic_exc,
                         ppo_epochs=args.ppo_epochs,
                         batch_size=min(args.ppo_batch_size, states_exc.size(0)),
                         eps_clip=args.ppo_eps,
@@ -307,13 +312,13 @@ def run_unsup2(args, logger):
                     pre_inh_events = pre_idx[inh_mask]
                     post_inh_events = post_idx[inh_mask]
                     actions_inh, logp_inh, _ = actor_inh(states_inh, extras_inh)
-                    values_inh = critic(states_inh, extras_inh)
+                    values_inh = critic_inh(states_inh, extras_inh)
                     returns_inh = rewards_tensor[batch_inh_events]
                     adv_inh = returns_inh - values_inh.detach()
 
                     ppo_update_events(
                         actor_inh,
-                        critic,
+                        critic_inh,
                         states_inh,
                         extras_inh,
                         actions_inh.detach(),
@@ -321,7 +326,7 @@ def run_unsup2(args, logger):
                         returns_inh.detach(),
                         adv_inh.detach(),
                         optimizer_actor_inh,
-                        optimizer_critic,
+                        optimizer_critic_inh,
                         ppo_epochs=args.ppo_epochs,
                         batch_size=min(args.ppo_batch_size, states_inh.size(0)),
                         eps_clip=args.ppo_eps,
