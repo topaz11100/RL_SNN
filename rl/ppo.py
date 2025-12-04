@@ -53,6 +53,60 @@ def ppo_update(
             optimizer_critic.step()
 
 
+def ppo_update_events(
+    actor: nn.Module,
+    critic: nn.Module,
+    states: torch.Tensor,
+    extras: torch.Tensor,
+    actions_old: torch.Tensor,
+    log_probs_old: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    optimizer_actor: torch.optim.Optimizer,
+    optimizer_critic: torch.optim.Optimizer,
+    ppo_epochs: int,
+    batch_size: int,
+    eps_clip: float = 0.2,
+    c_v: float = 1.0,
+):
+    """PPO update using flattened event batches."""
+
+    num_samples = states.size(0)
+    extras_available = extras.numel() > 0
+
+    for _ in range(ppo_epochs):
+        indices = torch.randperm(num_samples, device=states.device)
+        for start in range(0, num_samples, batch_size):
+            end = start + batch_size
+            batch_idx = indices[start:end]
+
+            states_mb = states[batch_idx]
+            actions_mb = actions_old[batch_idx]
+            log_probs_old_mb = log_probs_old[batch_idx]
+            advantages_mb = advantages[batch_idx]
+            returns_mb = returns[batch_idx]
+
+            extras_mb = extras[batch_idx] if extras_available else None
+
+            _, log_probs_new, _ = actor(states_mb, extras_mb, actions=actions_mb)
+            ratio = torch.exp(log_probs_new - log_probs_old_mb)
+
+            surr1 = ratio * advantages_mb
+            surr2 = torch.clamp(ratio, 1 - eps_clip, 1 + eps_clip) * advantages_mb
+            actor_loss = (-torch.min(surr1, surr2)).mean()
+
+            optimizer_actor.zero_grad()
+            actor_loss.backward()
+            optimizer_actor.step()
+
+            values_new = critic(states_mb, extras_mb)
+            value_loss = (returns_mb - values_new).pow(2).mean() * c_v
+
+            optimizer_critic.zero_grad()
+            value_loss.backward()
+            optimizer_critic.step()
+
+
 # Example self-check (not executed automatically):
 # if __name__ == "__main__":
 #     import torch.nn as nn
