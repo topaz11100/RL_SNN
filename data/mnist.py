@@ -28,8 +28,10 @@ def get_mnist_dataloaders(batch_size_images: int, seed: int) -> Tuple[DataLoader
     generator = torch.Generator().manual_seed(seed)
     train_dataset, val_dataset = random_split(train_val_dataset, [train_size, val_size], generator=generator)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_images, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size_images, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_images, shuffle=False)
+    loader_kwargs = dict(num_workers=4, pin_memory=True, persistent_workers=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size_images, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size_images, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size_images, shuffle=False, **loader_kwargs)
 
     return train_loader, val_loader, test_loader

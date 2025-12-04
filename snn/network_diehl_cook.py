@@ -36,6 +36,7 @@ class DiehlCookNetwork(nn.Module):
         self.exc_cell = LIFCell(self.exc_params, surrogate=False)
         self.inh_cell = LIFCell(self.inh_params, surrogate=False)
 
+    @torch.jit.export
     def forward(self, input_spikes: Tensor) -> Tuple[Tensor, Tensor]:
         """Simulate the E/I network for given input spike trains.
 
@@ -49,17 +50,16 @@ class DiehlCookNetwork(nn.Module):
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
         batch_size, _, T = input_spikes.shape
-        device = input_spikes.device
         dtype = input_spikes.dtype
 
-        exc_spikes = torch.zeros((batch_size, self.n_exc, T), device=device, dtype=dtype)
-        inh_spikes = torch.zeros((batch_size, self.n_inh, T), device=device, dtype=dtype)
-
-        v_exc = torch.full((batch_size, self.n_exc), self.exc_params.v_rest, device=device, dtype=dtype)
-        v_inh = torch.full((batch_size, self.n_inh), self.inh_params.v_rest, device=device, dtype=dtype)
+        v_exc = torch.full((batch_size, self.n_exc), self.exc_params.v_rest, device=input_spikes.device, dtype=dtype)
+        v_inh = torch.full((batch_size, self.n_inh), self.inh_params.v_rest, device=input_spikes.device, dtype=dtype)
 
         s_exc_prev = torch.zeros_like(v_exc)
         s_inh_prev = torch.zeros_like(v_inh)
+
+        exc_hist: Tuple[Tensor, ...] = ()
+        inh_hist: Tuple[Tensor, ...] = ()
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
@@ -70,10 +70,13 @@ class DiehlCookNetwork(nn.Module):
             I_inh = self.weight_ei * s_exc_prev
             v_inh, s_inh = self.inh_cell(v_inh, I_inh)
 
-            exc_spikes[:, :, t] = s_exc
-            inh_spikes[:, :, t] = s_inh
+            exc_hist = exc_hist + (s_exc,)
+            inh_hist = inh_hist + (s_inh,)
 
             s_exc_prev = s_exc
             s_inh_prev = s_inh
+
+        exc_spikes = torch.stack(exc_hist, dim=2)
+        inh_spikes = torch.stack(inh_hist, dim=2)
 
         return exc_spikes, inh_spikes
