@@ -183,7 +183,7 @@ def run_grad(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             batch_acc_tensor = (preds == labels).float().mean()
-            epoch_acc.append(batch_acc_tensor.detach())
+            epoch_acc.append(batch_acc_tensor.detach().cpu())
 
             event_buffer = EventBatchBuffer()
 
@@ -278,18 +278,18 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().flatten())
-                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().flatten())
+                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().cpu().flatten())
+                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().cpu().flatten())
 
-                delta_t_values.append(_extract_delta_t(states).detach())
-                delta_d_values.append(actions.detach())
+                delta_t_values.append(_extract_delta_t(states).detach().cpu())
+                delta_d_values.append(actions.detach().cpu())
 
-                epoch_reward.append(rewards.detach())
-                epoch_align.append(rewards.detach())
+                epoch_reward.append(rewards.detach().cpu())
+                epoch_align.append(rewards.detach().cpu())
             else:
                 zero_reward = torch.zeros(input_spikes.size(0), device=device)
-                epoch_reward.append(zero_reward)
-                epoch_align.append(zero_reward)
+                epoch_reward.append(zero_reward.detach().cpu())
+                epoch_align.append(zero_reward.detach().cpu())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -302,8 +302,8 @@ def run_grad(args, logger):
                 )
 
         mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
-        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
-        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0, device=device)
+        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0)
+        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0)
         mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
         mean_align = align_tensor.mean().item() if align_tensor.numel() > 0 else 0.0
 

@@ -56,10 +56,10 @@ class GradMimicryNetwork(nn.Module):
         hidden_spikes_list: List[List[Tensor]] = [[] for _ in range(n_hidden_layers)]
         output_spikes_list: List[Tensor] = []
 
-        v_states = [
+        v_states = tuple(
             torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype)
             for h in self.hidden_sizes
-        ]
+        )
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
 
         if n_hidden_layers == 0:
@@ -73,7 +73,7 @@ class GradMimicryNetwork(nn.Module):
             firing_rates = output_spikes.mean(dim=2)
             return [], output_spikes, firing_rates
 
-        s_prev = [torch.zeros_like(v) for v in v_states]
+        s_prev = tuple(torch.zeros_like(v) for v in v_states)
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
@@ -97,8 +97,8 @@ class GradMimicryNetwork(nn.Module):
             v_output_next, s_output = self.output_cell(v_output, current_out)
             output_spikes_list.append(s_output)
 
-            v_states = new_v_states
-            s_prev = new_s_prev
+            v_states = tuple(new_v_states)
+            s_prev = tuple(new_s_prev)
             v_output = v_output_next
 
         hidden_spikes = [torch.stack(s_list, dim=2) for s_list in hidden_spikes_list]
