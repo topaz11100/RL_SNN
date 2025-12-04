@@ -98,8 +98,8 @@
   - **Theory 연계**: `Theory.md` 6.4절의 gradient mimicry 실험 네트워크.
 - `forward(input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: 각 타임스텝마다 surrogate LIF 셀을 통해 모든 은닉층 막전위/스파이크를 갱신하고, 출력층 발화율을 계산해 역전파 가능하게 유지한다.
-  - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`.
+  - **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 스파이크를 **리스트에 수집한 뒤 `torch.stack`**으로 텐서화해 `vmap` 등 함수형 변환과 호환되도록 한다. 은닉층이 없을 때는 빈 리스트와 출력 스파이크만 반환한다.
+  - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`로 각 층/출력의 스파이크열과 평균 발화율.
   - **Theory 연계**: Teacher gradient 계산과 에이전트 시뮬레이션을 위한 differentiable forward.
 
 ## rl 모듈
