@@ -51,8 +51,10 @@ class GradMimicryNetwork(nn.Module):
         dtype = input_spikes.dtype
 
         n_hidden_layers = len(self.hidden_sizes)
-        hidden_spikes = [torch.zeros((batch_size, h, T), device=device, dtype=dtype) for h in self.hidden_sizes]
-        output_spikes = torch.zeros((batch_size, self.n_output, T), device=device, dtype=dtype)
+        
+        # [Fix for vmap] In-place 할당을 피하기 위해 리스트에 수집합니다.
+        hidden_spikes_list = [[] for _ in self.hidden_sizes]
+        output_spikes_list = []
 
         v_states = [torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype) for h in self.hidden_sizes]
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
@@ -62,32 +64,50 @@ class GradMimicryNetwork(nn.Module):
                 x_t = input_spikes[:, :, t]
                 current_out = torch.matmul(x_t, torch.relu(self.w_layers[0]))
                 v_output, s_output = self.output_cell(v_output, current_out)
-                output_spikes[:, :, t] = s_output
+                output_spikes_list.append(s_output)
+            
+            output_spikes = torch.stack(output_spikes_list, dim=2)
             firing_rates = output_spikes.mean(dim=2)
-            return hidden_spikes, output_spikes, firing_rates
+            return [], output_spikes, firing_rates
 
-        s_prev = [torch.zeros_like(v_states[i]) for i in range(n_hidden_layers)]
+        s_prev = [torch.zeros_like(v) for v in v_states]
+        s_hidden = None  # 초기화
 
         for t in range(T):
             x_t = input_spikes[:, :, t]
+            
+            # 첫 번째 은닉층
             current = torch.matmul(x_t, torch.relu(self.w_layers[0]))
-            v_states[0], s_hidden = self.hidden_cell(v_states[0], current)
-            hidden_spikes[0][:, :, t] = s_hidden
+            v_states[0], s_hidden_0 = self.hidden_cell(v_states[0], current)
+            hidden_spikes_list[0].append(s_hidden_0)
+            
+            # 현재 스텝의 은닉층 출력을 저장할 임시 변수
+            s_curr_layer_out = s_hidden_0
 
+            # 나머지 은닉층
             for li in range(1, n_hidden_layers):
+                # 이전 층의 '이전 스텝' 스파이크(s_prev)를 입력으로 사용
                 current = torch.matmul(s_prev[li - 1], torch.relu(self.w_layers[li]))
                 v_states[li], s_curr = self.hidden_cell(v_states[li], current)
-                hidden_spikes[li][:, :, t] = s_curr
-                s_hidden = s_curr
+                hidden_spikes_list[li].append(s_curr)
+                s_curr_layer_out = s_curr
 
-            prev_spikes = s_prev[-1] if n_hidden_layers > 0 else s_hidden
-            current_out = torch.matmul(prev_spikes, torch.relu(self.w_layers[-1]))
+            # 출력층 (마지막 은닉층의 이전 스텝 스파이크 사용)
+            prev_spikes_for_output = s_prev[-1]
+            current_out = torch.matmul(prev_spikes_for_output, torch.relu(self.w_layers[-1]))
             v_output, s_output = self.output_cell(v_output, current_out)
-            output_spikes[:, :, t] = s_output
+            output_spikes_list.append(s_output)
 
-            s_prev[0] = hidden_spikes[0][:, :, t]
+            # s_prev 업데이트 (다음 타임스텝에서 사용하기 위해 현재 스파이크 저장)
+            # 리스트의 요소를 교체하는 것은 Tensor In-place 연산이 아니므로 안전합니다.
+            s_prev[0] = s_hidden_0
             for li in range(1, n_hidden_layers):
-                s_prev[li] = hidden_spikes[li][:, :, t]
+                # 주의: hidden_spikes_list[li][-1]은 방금 추가한 현재 스텝 스파이크
+                s_prev[li] = hidden_spikes_list[li][-1]
+
+        # 리스트를 텐서로 변환 (Time 축 = dim 2)
+        hidden_spikes = [torch.stack(s_list, dim=2) for s_list in hidden_spikes_list]
+        output_spikes = torch.stack(output_spikes_list, dim=2)
 
         firing_rates = output_spikes.mean(dim=2)
         return hidden_spikes, output_spikes, firing_rates
