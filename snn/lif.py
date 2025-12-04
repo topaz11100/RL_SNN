@@ -39,10 +39,10 @@ def lif_dynamics(
         spikes = (v_next >= params.v_th).to(v_next.dtype)
 
     spikes_detached = spikes.detach()
-    v_reset = torch.as_tensor(params.v_reset, device=v_next.device, dtype=v_next.dtype)
-    v_next = v_next * (1.0 - spikes_detached) + v_reset * spikes_detached
+    v_reset = torch.full_like(v_next, params.v_reset)
+    v_after_reset = torch.where(spikes_detached.bool(), v_reset, v_next)
 
-    return v_next, spikes
+    return v_after_reset, spikes
 
 
 # Optimized: Provide both non-JIT and scripted variants to avoid vmap/JIT conflicts while

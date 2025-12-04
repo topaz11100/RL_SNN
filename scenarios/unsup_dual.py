@@ -257,10 +257,10 @@ def run_unsup2(args, logger):
             if state_inh.numel() > 0:
                 event_buffer.add(indices[batch_inh], 1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
 
-            epoch_sparse.extend(r_sparse.tolist())
-            epoch_div.extend(r_div.tolist())
-            epoch_stab.extend(r_stab.tolist())
-            epoch_total.extend(total_reward.tolist())
+            epoch_sparse.append(r_sparse.detach())
+            epoch_div.append(r_div.detach())
+            epoch_stab.append(r_stab.detach())
+            epoch_total.append(total_reward.detach())
 
             if len(event_buffer) > 0:
                 states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
@@ -300,8 +300,8 @@ def run_unsup2(args, logger):
                         delta_exc = args.local_lr * s_scen * actions_exc.detach()
                         _scatter_updates(delta_exc, pre_exc_events, post_exc_events, network.w_input_exc)
                         network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
-                    delta_t_exc.append(_extract_delta_t(states_exc).detach().cpu())
-                    delta_d_exc.append(actions_exc.detach().cpu())
+                    delta_t_exc.append(_extract_delta_t(states_exc).detach())
+                    delta_d_exc.append(actions_exc.detach())
 
                 # Inhibitory pathway
                 inh_mask = connection_ids == 1
@@ -343,8 +343,8 @@ def run_unsup2(args, logger):
                             valid_mask=network.inh_exc_mask,
                         )
                         network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
-                    delta_t_inh.append(_extract_delta_t(states_inh).detach().cpu())
-                    delta_d_inh.append(actions_inh.detach().cpu())
+                    delta_t_inh.append(_extract_delta_t(states_inh).detach())
+                    delta_d_inh.append(actions_inh.detach())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -355,10 +355,14 @@ def run_unsup2(args, logger):
                     len(train_loader),
                 )
 
-        mean_sparse = sum(epoch_sparse) / len(epoch_sparse)
-        mean_div = sum(epoch_div) / len(epoch_div)
-        mean_stab = sum(epoch_stab) / len(epoch_stab)
-        mean_total = sum(epoch_total) / len(epoch_total)
+        sparse_tensor = torch.cat(epoch_sparse) if epoch_sparse else torch.empty(0, device=device)
+        div_tensor = torch.cat(epoch_div) if epoch_div else torch.empty(0, device=device)
+        stab_tensor = torch.cat(epoch_stab) if epoch_stab else torch.empty(0, device=device)
+        total_tensor = torch.cat(epoch_total) if epoch_total else torch.empty(0, device=device)
+        mean_sparse = sparse_tensor.mean().item() if sparse_tensor.numel() > 0 else 0.0
+        mean_div = div_tensor.mean().item() if div_tensor.numel() > 0 else 0.0
+        mean_stab = stab_tensor.mean().item() if stab_tensor.numel() > 0 else 0.0
+        mean_total = total_tensor.mean().item() if total_tensor.numel() > 0 else 0.0
 
         with open(metrics_path, "a") as f:
             f.write(f"{epoch}\t{mean_sparse:.6f}\t{mean_div:.6f}\t{mean_stab:.6f}\t{mean_total:.6f}\n")
@@ -390,15 +394,15 @@ def run_unsup2(args, logger):
                 test_acc,
             )
 
-    delta_t_exc_concat = torch.cat(delta_t_exc, dim=0) if delta_t_exc else torch.empty(0)
-    delta_d_exc_concat = torch.cat(delta_d_exc, dim=0) if delta_d_exc else torch.empty(0)
+    delta_t_exc_concat = torch.cat(delta_t_exc, dim=0).cpu() if delta_t_exc else torch.empty(0)
+    delta_d_exc_concat = torch.cat(delta_d_exc, dim=0).cpu() if delta_d_exc else torch.empty(0)
     if delta_t_exc_concat.numel() > 0 and delta_d_exc_concat.numel() > 0:
         plot_delta_t_delta_d(
             delta_t_exc_concat, delta_d_exc_concat, os.path.join(args.result_dir, "delta_t_delta_d_exc.png")
         )
 
-    delta_t_inh_concat = torch.cat(delta_t_inh, dim=0) if delta_t_inh else torch.empty(0)
-    delta_d_inh_concat = torch.cat(delta_d_inh, dim=0) if delta_d_inh else torch.empty(0)
+    delta_t_inh_concat = torch.cat(delta_t_inh, dim=0).cpu() if delta_t_inh else torch.empty(0)
+    delta_d_inh_concat = torch.cat(delta_d_inh, dim=0).cpu() if delta_d_inh else torch.empty(0)
     if delta_t_inh_concat.numel() > 0 and delta_d_inh_concat.numel() > 0:
         plot_delta_t_delta_d(
             delta_t_inh_concat, delta_d_inh_concat, os.path.join(args.result_dir, "delta_t_delta_d_inh.png")

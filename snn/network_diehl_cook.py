@@ -28,10 +28,10 @@ def _diehl_cook_forward_script(
     exc_hist: Tuple[Tensor, ...] = ()
     inh_hist: Tuple[Tensor, ...] = ()
 
+    w_inh_exc_masked = torch.relu(w_inh_exc) * inh_exc_mask
+
     for t in range(T):
         x_t = input_spikes[:, :, t]
-        # Fix: enforce inhibitory mask every step to prevent self-inhibition during training.
-        w_inh_exc_masked = torch.relu(w_inh_exc) * inh_exc_mask
         I_exc = torch.matmul(x_t, torch.relu(w_input_exc)) - torch.matmul(s_inh_prev, w_inh_exc_masked)
         v_exc, s_exc = lif_step_script(v_exc, I_exc, exc_params)
 

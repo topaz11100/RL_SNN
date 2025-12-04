@@ -182,8 +182,8 @@ def run_grad(args, logger):
             hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
 
             preds = firing_rates.argmax(dim=1)
-            batch_acc = (preds == labels).float().mean().item()
-            epoch_acc.append(batch_acc)
+            batch_acc_tensor = (preds == labels).float().mean()
+            epoch_acc.append(batch_acc_tensor.detach())
 
             event_buffer = EventBatchBuffer()
 
@@ -278,14 +278,18 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().cpu().flatten())
-                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().cpu().flatten())
+                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().flatten())
+                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().flatten())
 
-                delta_t_values.append(_extract_delta_t(states).detach().cpu())
-                delta_d_values.append(actions.detach().cpu())
+                delta_t_values.append(_extract_delta_t(states).detach())
+                delta_d_values.append(actions.detach())
 
-                epoch_reward.extend(rewards.tolist())
-                epoch_align.extend(rewards.tolist())
+                epoch_reward.append(rewards.detach())
+                epoch_align.append(rewards.detach())
+            else:
+                zero_reward = torch.zeros(input_spikes.size(0), device=device)
+                epoch_reward.append(zero_reward)
+                epoch_align.append(zero_reward)
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -294,16 +298,14 @@ def run_grad(args, logger):
                     args.num_epochs,
                     batch_idx,
                     len(train_loader),
-                    batch_acc,
+                    batch_acc_tensor.item(),
                 )
 
-            if rewards.numel() == 0:
-                epoch_reward.append(0.0)
-                epoch_align.append(0.0)
-
-        mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0
-        mean_reward = sum(epoch_reward) / len(epoch_reward) if epoch_reward else 0.0
-        mean_align = sum(epoch_align) / len(epoch_align) if epoch_align else 0.0
+        mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
+        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
+        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0, device=device)
+        mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
+        mean_align = align_tensor.mean().item() if align_tensor.numel() > 0 else 0.0
 
         val_acc, val_reward = _evaluate(network, val_loader, device, args)
         test_acc, test_reward = _evaluate(network, test_loader, device, args)
@@ -328,8 +330,8 @@ def run_grad(args, logger):
             if args.log_gradient_stats:
                 logger.info("Gradient alignment mean (train): %.4f", mean_align)
 
-    delta_t_concat = torch.cat(delta_t_values, dim=0) if delta_t_values else torch.empty(0)
-    delta_d_concat = torch.cat(delta_d_values, dim=0) if delta_d_values else torch.empty(0)
+    delta_t_concat = torch.cat(delta_t_values, dim=0).cpu() if delta_t_values else torch.empty(0)
+    delta_d_concat = torch.cat(delta_d_values, dim=0).cpu() if delta_d_values else torch.empty(0)
     if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
         plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
 
@@ -340,6 +342,6 @@ def run_grad(args, logger):
         )
 
     if agent_deltas_log and teacher_deltas_log:
-        agent_cat = torch.cat(agent_deltas_log)
-        teacher_cat = torch.cat(teacher_deltas_log)
+        agent_cat = torch.cat(agent_deltas_log).cpu()
+        teacher_cat = torch.cat(teacher_deltas_log).cpu()
         plot_grad_alignment(agent_cat, teacher_cat, os.path.join(args.result_dir, "grad_alignment.png"))
