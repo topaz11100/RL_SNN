@@ -1,4 +1,5 @@
 import os
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -6,13 +7,21 @@ import torch.nn.functional as F
 
 from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
 from data.mnist import get_mnist_dataloaders
-from rl.buffers import EpisodeBuffer
+import os
+from typing import Optional, Tuple
+
+import torch
+import torch.nn.functional as F
+
+from data.mnist import get_mnist_dataloaders
+from rl.buffers import EventBatchBuffer
 from rl.policy import GaussianPolicy
-from rl.ppo import ppo_update
+from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_diehl_cook import DiehlCookNetwork
+from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
 
 
 def _ensure_metrics_file(path: str) -> None:
@@ -39,7 +48,7 @@ def _gather_events(
     weights: torch.Tensor,
     L: int,
     valid_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
     n_post = post_spikes.shape[1]
@@ -51,24 +60,29 @@ def _gather_events(
     extras = []
     pre_indices = []
     post_indices = []
+    batch_indices = []
 
     def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
         indices = (spike_tensor == 1).nonzero(as_tuple=False)
         if indices.numel() == 0:
             return
+        base_batch = indices[:, 0]
+        base_idx = indices[:, 1]
+        time_idx = indices[:, 2]
+
         if is_pre_event:
-            batch_idx = indices[:, 0].repeat_interleave(n_post)
-            pre_idx = indices[:, 1].repeat_interleave(n_post)
+            batch_idx = base_batch.repeat_interleave(n_post)
+            pre_idx = base_idx.repeat_interleave(n_post)
             post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
             e_type = torch.tensor([1.0, 0.0], device=device)
             repeat_count = n_post
         else:
-            batch_idx = indices[:, 0].repeat_interleave(n_pre)
-            post_idx = indices[:, 1].repeat_interleave(n_pre)
+            batch_idx = base_batch.repeat_interleave(n_pre)
+            post_idx = base_idx.repeat_interleave(n_pre)
             pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
             e_type = torch.tensor([0.0, 1.0], device=device)
             repeat_count = n_pre
-        time_idx = indices[:, 2].repeat_interleave(repeat_count)
+        time_idx = time_idx.repeat_interleave(repeat_count)
         if valid_mask is not None:
             mask_flat = valid_mask[pre_idx, post_idx] > 0.5
             if mask_flat.sum() == 0:
@@ -86,6 +100,7 @@ def _gather_events(
         extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
+        batch_indices.append(batch_idx)
 
     _append_events(pre_spikes, True)
     _append_events(post_spikes, False)
@@ -96,6 +111,7 @@ def _gather_events(
             torch.empty(0, 3, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
         )
 
     return (
@@ -103,6 +119,7 @@ def _gather_events(
         torch.cat(extras, dim=0),
         torch.cat(pre_indices, dim=0),
         torch.cat(post_indices, dim=0),
+        torch.cat(batch_indices, dim=0),
     )
 
 
@@ -189,104 +206,139 @@ def run_unsup2(args, logger):
 
             r_sparse, firing_rates = _compute_sparse_reward(exc_spikes, args.rho_target)
 
-            batch_buffer_exc = EpisodeBuffer()
-            batch_buffer_inh = EpisodeBuffer()
-
             winners = firing_rates.argmax(dim=1)
 
-            for b in range(input_spikes.size(0)):
-                prev = prev_winners[indices[b]].item()
-                r_stab_value = 0.0 if prev < 0 else (1.0 if winners[b].item() == prev else -1.0)
-                prev_winners[indices[b]] = winners[b]
+            prev_values = prev_winners[indices]
+            stable_mask = prev_values >= 0
+            r_stab = torch.where(
+                stable_mask & (winners == prev_values),
+                torch.tensor(1.0, device=device),
+                torch.tensor(0.0, device=device),
+            )
+            r_stab = torch.where(
+                stable_mask & (winners != prev_values), torch.tensor(-1.0, device=device), r_stab
+            )
+            prev_winners[indices] = winners
 
-                winner_counts[winners[b]] += 1
-                total_seen += 1
-                p = winner_counts / total_seen
-                uniform = 1.0 / args.N_E
-                r_div_value = -(p - uniform).pow(2).sum()
+            one_hot_winners = F.one_hot(winners, num_classes=args.N_E).to(dtype=winner_counts.dtype)
+            cumulative_counts = winner_counts.unsqueeze(0) + torch.cumsum(one_hot_winners, dim=0)
+            total_seen_tensor = torch.tensor(total_seen, device=device, dtype=winner_counts.dtype)
+            total_seen_per = total_seen_tensor + torch.arange(
+                1, winners.size(0) + 1, device=device, dtype=winner_counts.dtype
+            )
+            uniform = 1.0 / args.N_E
+            r_div = -((cumulative_counts / total_seen_per.unsqueeze(1) - uniform).pow(2).sum(dim=1))
 
-                total_reward = (
-                    args.alpha_sparse * r_sparse[b]
-                    + args.alpha_div * r_div_value
-                    + args.alpha_stab * torch.tensor(r_stab_value, device=device)
-                )
+            winner_counts += one_hot_winners.sum(dim=0)
+            total_seen += winners.size(0)
 
-                state_exc, extra_exc, pre_exc, post_exc = _gather_events(
-                    input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
-                )
-                if state_exc.numel() > 0:
-                    action_exc, logp_exc, _ = actor_exc(state_exc, extra_exc)
-                    value_exc = critic(state_exc, extra_exc)
+            total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
+
+            state_exc, extra_exc, pre_exc, post_exc, batch_exc = _gather_events(
+                input_spikes, exc_spikes, network.w_input_exc, args.spike_array_len
+            )
+            state_inh, extra_inh, pre_inh, post_inh, batch_inh = _gather_events(
+                inh_spikes,
+                exc_spikes,
+                network.w_inh_exc,
+                args.spike_array_len,
+                valid_mask=network.inh_exc_mask,
+            )
+
+            event_buffer = EventBatchBuffer()
+            if state_exc.numel() > 0:
+                event_buffer.add(indices[batch_exc], 0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
+            if state_inh.numel() > 0:
+                event_buffer.add(indices[batch_inh], 1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
+
+            epoch_sparse.extend(r_sparse.tolist())
+            epoch_div.extend(r_div.tolist())
+            epoch_stab.extend(r_stab.tolist())
+            epoch_total.extend(total_reward.tolist())
+
+            if len(event_buffer) > 0:
+                states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
+                rewards_tensor = total_reward.detach()
+
+                # Excitatory pathway
+                exc_mask = connection_ids == 0
+                if exc_mask.any():
+                    states_exc = states[exc_mask]
+                    extras_exc = extras[exc_mask]
+                    batch_exc_events = batch_idx_events[exc_mask]
+                    pre_exc_events = pre_idx[exc_mask]
+                    post_exc_events = post_idx[exc_mask]
+                    actions_exc, logp_exc, _ = actor_exc(states_exc, extras_exc)
+                    values_exc = critic(states_exc, extras_exc)
+                    returns_exc = rewards_tensor[batch_exc_events]
+                    adv_exc = returns_exc - values_exc.detach()
+
+                    ppo_update_events(
+                        actor_exc,
+                        critic,
+                        states_exc,
+                        extras_exc,
+                        actions_exc.detach(),
+                        logp_exc.detach(),
+                        returns_exc.detach(),
+                        adv_exc.detach(),
+                        optimizer_actor_exc,
+                        optimizer_critic,
+                        ppo_epochs=args.ppo_epochs,
+                        batch_size=min(args.ppo_batch_size, states_exc.size(0)),
+                        eps_clip=args.ppo_eps,
+                        c_v=1.0,
+                    )
+
                     with torch.no_grad():
-                        _scatter_updates(args.local_lr * s_scen * action_exc, pre_exc, post_exc, network.w_input_exc)
+                        delta_exc = args.local_lr * s_scen * actions_exc.detach()
+                        _scatter_updates(delta_exc, pre_exc_events, post_exc_events, network.w_input_exc)
                         network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
-                    delta_t_exc.append(_extract_delta_t(state_exc).detach().cpu())
-                    delta_d_exc.append(action_exc.detach().cpu())
+                    delta_t_exc.append(_extract_delta_t(states_exc).detach().cpu())
+                    delta_d_exc.append(actions_exc.detach().cpu())
 
-                    buffer_exc = EpisodeBuffer()
-                    for i in range(state_exc.size(0)):
-                        buffer_exc.append(state_exc[i], extra_exc[i], action_exc[i], logp_exc[i], value_exc[i])
-                    buffer_exc.finalize(total_reward)
-                    batch_buffer_exc.extend(buffer_exc)
+                # Inhibitory pathway
+                inh_mask = connection_ids == 1
+                if inh_mask.any():
+                    states_inh = states[inh_mask]
+                    extras_inh = extras[inh_mask]
+                    batch_inh_events = batch_idx_events[inh_mask]
+                    pre_inh_events = pre_idx[inh_mask]
+                    post_inh_events = post_idx[inh_mask]
+                    actions_inh, logp_inh, _ = actor_inh(states_inh, extras_inh)
+                    values_inh = critic(states_inh, extras_inh)
+                    returns_inh = rewards_tensor[batch_inh_events]
+                    adv_inh = returns_inh - values_inh.detach()
 
-                state_inh, extra_inh, pre_inh, post_inh = _gather_events(
-                    inh_spikes[b : b + 1],
-                    exc_spikes[b : b + 1],
-                    network.w_inh_exc,
-                    args.spike_array_len,
-                    valid_mask=network.inh_exc_mask,
-                )
-                if state_inh.numel() > 0:
-                    action_inh, logp_inh, _ = actor_inh(state_inh, extra_inh)
-                    value_inh = critic(state_inh, extra_inh)
+                    ppo_update_events(
+                        actor_inh,
+                        critic,
+                        states_inh,
+                        extras_inh,
+                        actions_inh.detach(),
+                        logp_inh.detach(),
+                        returns_inh.detach(),
+                        adv_inh.detach(),
+                        optimizer_actor_inh,
+                        optimizer_critic,
+                        ppo_epochs=args.ppo_epochs,
+                        batch_size=min(args.ppo_batch_size, states_inh.size(0)),
+                        eps_clip=args.ppo_eps,
+                        c_v=1.0,
+                    )
+
                     with torch.no_grad():
+                        delta_inh = args.local_lr * s_scen * actions_inh.detach()
                         _scatter_updates(
-                            args.local_lr * s_scen * action_inh,
-                            pre_inh,
-                            post_inh,
+                            delta_inh,
+                            pre_inh_events,
+                            post_inh_events,
                             network.w_inh_exc,
                             valid_mask=network.inh_exc_mask,
                         )
                         network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
-                    delta_t_inh.append(_extract_delta_t(state_inh).detach().cpu())
-                    delta_d_inh.append(action_inh.detach().cpu())
-
-                    buffer_inh = EpisodeBuffer()
-                    for i in range(state_inh.size(0)):
-                        buffer_inh.append(state_inh[i], extra_inh[i], action_inh[i], logp_inh[i], value_inh[i])
-                    buffer_inh.finalize(total_reward)
-                    batch_buffer_inh.extend(buffer_inh)
-
-                epoch_sparse.append(r_sparse[b].item())
-                epoch_div.append(r_div_value.item())
-                epoch_stab.append(r_stab_value)
-                epoch_total.append(total_reward.item())
-
-            if len(batch_buffer_exc) > 0:
-                ppo_update(
-                    actor_exc,
-                    critic,
-                    batch_buffer_exc,
-                    optimizer_actor_exc,
-                    optimizer_critic,
-                    ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(batch_buffer_exc)),
-                    eps_clip=args.ppo_eps,
-                    c_v=1.0,
-                )
-
-            if len(batch_buffer_inh) > 0:
-                ppo_update(
-                    actor_inh,
-                    critic,
-                    batch_buffer_inh,
-                    optimizer_actor_inh,
-                    optimizer_critic,
-                    ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(batch_buffer_inh)),
-                    eps_clip=args.ppo_eps,
-                    c_v=1.0,
-                )
+                    delta_t_inh.append(_extract_delta_t(states_inh).detach().cpu())
+                    delta_d_inh.append(actions_inh.detach().cpu())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(

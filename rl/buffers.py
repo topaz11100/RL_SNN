@@ -60,18 +60,20 @@ class EventBatchBuffer:
         self.states: List[torch.Tensor] = []
         self.extra_features: List[torch.Tensor] = []
         self.episode_ids: List[torch.Tensor] = []
+        self.batch_indices: List[torch.Tensor] = []
         self.connection_ids: List[torch.Tensor] = []
         self.pre_indices: List[torch.Tensor] = []
         self.post_indices: List[torch.Tensor] = []
 
     def add(
         self,
-        episode_id: int,
+        episode_id,
         connection_id: int,
         states: torch.Tensor,
         extras: torch.Tensor,
         pre_idx: torch.Tensor,
         post_idx: torch.Tensor,
+        batch_idx: torch.Tensor,
     ) -> None:
         if states.numel() == 0:
             return
@@ -79,10 +81,15 @@ class EventBatchBuffer:
         device = states.device
         self.states.append(states.detach())
         self.extra_features.append(extras.detach())
-        self.episode_ids.append(torch.full((count,), episode_id, device=device, dtype=torch.long))
+        if torch.is_tensor(episode_id):
+            episode_tensor = episode_id.to(device=device, dtype=torch.long)
+        else:
+            episode_tensor = torch.full((count,), episode_id, device=device, dtype=torch.long)
+        self.episode_ids.append(episode_tensor)
         self.connection_ids.append(torch.full((count,), connection_id, device=device, dtype=torch.long))
         self.pre_indices.append(pre_idx)
         self.post_indices.append(post_idx)
+        self.batch_indices.append(batch_idx.to(device=device, dtype=torch.long))
 
     def flatten(self) -> Tuple[torch.Tensor, ...]:
         if not self.states:
@@ -93,7 +100,8 @@ class EventBatchBuffer:
         connection_ids = torch.cat(self.connection_ids, dim=0)
         pre_idx = torch.cat(self.pre_indices, dim=0)
         post_idx = torch.cat(self.post_indices, dim=0)
-        return states, extras, episode_ids, connection_ids, pre_idx, post_idx
+        batch_idx = torch.cat(self.batch_indices, dim=0)
+        return states, extras, episode_ids, connection_ids, pre_idx, post_idx, batch_idx
 
     def __len__(self) -> int:
         if not self.states:

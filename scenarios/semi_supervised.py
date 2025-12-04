@@ -6,14 +6,21 @@ import torch.nn.functional as F
 
 from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
 
+import os
+from typing import Tuple
+
+import torch
+import torch.nn.functional as F
+
 from data.mnist import get_mnist_dataloaders
-from rl.buffers import EpisodeBuffer
+from rl.buffers import EventBatchBuffer
 from rl.policy import GaussianPolicy
-from rl.ppo import ppo_update
+from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_semi_supervised import SemiSupervisedNetwork
+from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
 
 
 def _ensure_metrics_file(path: str, header: str) -> None:
@@ -24,7 +31,7 @@ def _ensure_metrics_file(path: str, header: str) -> None:
 
 def _gather_events(
     pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
     n_post = post_spikes.shape[1]
@@ -32,25 +39,28 @@ def _gather_events(
     pad_post = F.pad(post_spikes, (L - 1, 0))
     idx_range = torch.arange(L, device=device)
 
-    histories, extras, pre_indices, post_indices = [], [], [], []
+    histories, extras, pre_indices, post_indices, batch_indices = [], [], [], [], []
 
     def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
         indices = (spike_tensor == 1).nonzero(as_tuple=False)
         if indices.numel() == 0:
             return
+        base_batch = indices[:, 0]
+        base_idx = indices[:, 1]
+        time_idx = indices[:, 2]
         if is_pre_event:
-            batch_idx = indices[:, 0].repeat_interleave(n_post)
-            pre_idx = indices[:, 1].repeat_interleave(n_post)
+            batch_idx = base_batch.repeat_interleave(n_post)
+            pre_idx = base_idx.repeat_interleave(n_post)
             post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
             e_type = torch.tensor([1.0, 0.0], device=device)
             repeat_count = n_post
         else:
-            batch_idx = indices[:, 0].repeat_interleave(n_pre)
-            post_idx = indices[:, 1].repeat_interleave(n_pre)
+            batch_idx = base_batch.repeat_interleave(n_pre)
+            post_idx = base_idx.repeat_interleave(n_pre)
             pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
             e_type = torch.tensor([0.0, 1.0], device=device)
             repeat_count = n_pre
-        time_idx = indices[:, 2].repeat_interleave(repeat_count)
+        time_idx = time_idx.repeat_interleave(repeat_count)
         pos = time_idx + (L - 1)
         time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
         pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
@@ -60,6 +70,7 @@ def _gather_events(
         extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
+        batch_indices.append(batch_idx)
 
     _append_events(pre_spikes, True)
     _append_events(post_spikes, False)
@@ -70,6 +81,7 @@ def _gather_events(
             torch.empty(0, 3, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
         )
 
     return (
@@ -77,6 +89,7 @@ def _gather_events(
         torch.cat(extras, dim=0),
         torch.cat(pre_indices, dim=0),
         torch.cat(post_indices, dim=0),
+        torch.cat(batch_indices, dim=0),
     )
 
 
@@ -177,73 +190,57 @@ def run_semi(args, logger):
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
-            batch_buffer = EpisodeBuffer()
+            state_in, extra_in, pre_in, post_in, batch_in = _gather_events(
+                input_spikes, hidden_spikes, network.w_input_hidden, args.spike_array_len
+            )
+            state_out, extra_out, pre_out, post_out, batch_out = _gather_events(
+                hidden_spikes, output_spikes, network.w_hidden_output, args.spike_array_len
+            )
 
-            for b in range(input_spikes.size(0)):
-                events_in = _gather_events(
-                    input_spikes[b : b + 1], hidden_spikes[b : b + 1], network.w_input_hidden, args.spike_array_len
-                )
-                events_out = _gather_events(
-                    hidden_spikes[b : b + 1], output_spikes[b : b + 1], network.w_hidden_output, args.spike_array_len
-                )
+            event_buffer = EventBatchBuffer()
+            if state_in.numel() > 0:
+                event_buffer.add(batch_in, 0, state_in, extra_in, pre_in, post_in, batch_in)
+            if state_out.numel() > 0:
+                event_buffer.add(batch_out, 1, state_out, extra_out, pre_out, post_out, batch_out)
 
-                state_batches = []
-                extra_batches = []
-                slices = []
-                if events_in[0].numel() > 0:
-                    state_batches.append(events_in[0])
-                    extra_batches.append(events_in[1])
-                    slices.append(("in", events_in))
-                if events_out[0].numel() > 0:
-                    state_batches.append(events_out[0])
-                    extra_batches.append(events_out[1])
-                    slices.append(("out", events_out))
+            if len(event_buffer) > 0:
+                states, extras, _, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
+                actions, log_probs_old, _ = actor(states, extras)
+                values_old = critic(states, extras)
 
-                if state_batches:
-                    states = torch.cat(state_batches, dim=0)
-                    extras = torch.cat(extra_batches, dim=0)
+                returns = r_total.detach()[batch_indices]
+                advantages = returns - values_old.detach()
 
-                    action, log_prob, _ = actor(states, extras)
-                    value = critic(states, extras)
-
-                    offset = 0
-                    episode_buffer = EpisodeBuffer()
-                    for name, events in slices:
-                        count = events[0].size(0)
-                        idx_slice = slice(offset, offset + count)
-                        if name == "in":
-                            _scatter_updates(
-                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_input_hidden
-                            )
-                            with torch.no_grad():
-                                network.w_input_hidden.clamp_(args.exc_clip_min, args.exc_clip_max)
-                        else:
-                            _scatter_updates(
-                                args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_hidden_output
-                            )
-                            with torch.no_grad():
-                                network.w_hidden_output.clamp_(args.exc_clip_min, args.exc_clip_max)
-                        delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
-                        delta_d_values.append(action[idx_slice].detach().cpu())
-                        offset += count
-
-                    for i in range(states.size(0)):
-                        episode_buffer.append(states[i], extras[i], action[i], log_prob[i], value[i])
-                    episode_buffer.finalize(r_total[b])
-                    batch_buffer.extend(episode_buffer)
-
-            if len(batch_buffer) > 0:
-                ppo_update(
+                ppo_update_events(
                     actor,
                     critic,
-                    batch_buffer,
+                    states,
+                    extras,
+                    actions.detach(),
+                    log_probs_old.detach(),
+                    returns.detach(),
+                    advantages.detach(),
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(batch_buffer)),
+                    batch_size=min(args.ppo_batch_size, states.size(0)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
                 )
+
+                with torch.no_grad():
+                    delta = args.local_lr * s_scen * actions.detach()
+                    in_mask = connection_ids == 0
+                    if in_mask.any():
+                        _scatter_updates(delta[in_mask], pre_idx[in_mask], post_idx[in_mask], network.w_input_hidden)
+                        network.w_input_hidden.clamp_(args.exc_clip_min, args.exc_clip_max)
+                    out_mask = connection_ids == 1
+                    if out_mask.any():
+                        _scatter_updates(delta[out_mask], pre_idx[out_mask], post_idx[out_mask], network.w_hidden_output)
+                        network.w_hidden_output.clamp_(args.exc_clip_min, args.exc_clip_max)
+
+                delta_t_values.append(_extract_delta_t(states).detach().cpu())
+                delta_d_values.append(actions.detach().cpu())
 
             epoch_margin.append(r_margin.mean().item())
             epoch_reward.append(r_total.mean().item())

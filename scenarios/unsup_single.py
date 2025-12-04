@@ -39,36 +39,39 @@ def _gather_events(
     weights: torch.Tensor,
     L: int,
     valid_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
-    batch_size, n_pre, T = pre_spikes.shape
+    _, n_pre, _ = pre_spikes.shape
     n_post = post_spikes.shape[1]
     pad_pre = F.pad(pre_spikes, (L - 1, 0))
     pad_post = F.pad(post_spikes, (L - 1, 0))
     idx_range = torch.arange(L, device=device)
 
-    histories = []
-    extras = []
-    pre_indices = []
-    post_indices = []
+    histories, extras = [], []
+    pre_indices, post_indices, batch_indices = [], [], []
 
     def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
         indices = (spike_tensor == 1).nonzero(as_tuple=False)
         if indices.numel() == 0:
             return
+        base_batch = indices[:, 0]
+        base_idx = indices[:, 1]
+        time_idx = indices[:, 2]
+
         if is_pre_event:
-            batch_idx = indices[:, 0].repeat_interleave(n_post)
-            pre_idx = indices[:, 1].repeat_interleave(n_post)
+            batch_idx = base_batch.repeat_interleave(n_post)
+            pre_idx = base_idx.repeat_interleave(n_post)
             post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
             e_type = torch.tensor([1.0, 0.0], device=device)
             repeat_count = n_post
         else:
-            batch_idx = indices[:, 0].repeat_interleave(n_pre)
-            post_idx = indices[:, 1].repeat_interleave(n_pre)
+            batch_idx = base_batch.repeat_interleave(n_pre)
+            post_idx = base_idx.repeat_interleave(n_pre)
             pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
             e_type = torch.tensor([0.0, 1.0], device=device)
             repeat_count = n_pre
-        time_idx = indices[:, 2].repeat_interleave(repeat_count)
+
+        time_idx = time_idx.repeat_interleave(repeat_count)
         if valid_mask is not None:
             mask_flat = valid_mask[pre_idx, post_idx] > 0.5
             if mask_flat.sum() == 0:
@@ -77,15 +80,18 @@ def _gather_events(
             pre_idx = pre_idx[mask_flat]
             post_idx = post_idx[mask_flat]
             time_idx = time_idx[mask_flat]
+
         pos = time_idx + (L - 1)
         time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
         pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
         post_hist = pad_post[batch_idx.unsqueeze(1), post_idx.unsqueeze(1), time_indices]
+
         histories.append(torch.stack([pre_hist, post_hist], dim=1))
         w_vals = weights[pre_idx, post_idx].unsqueeze(1)
         extras.append(torch.cat([w_vals, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
+        batch_indices.append(batch_idx)
 
     _append_events(pre_spikes, True)
     _append_events(post_spikes, False)
@@ -96,6 +102,7 @@ def _gather_events(
             torch.empty(0, 3, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
         )
 
     return (
@@ -103,6 +110,7 @@ def _gather_events(
         torch.cat(extras, dim=0),
         torch.cat(pre_indices, dim=0),
         torch.cat(post_indices, dim=0),
+        torch.cat(batch_indices, dim=0),
     )
 
 
@@ -207,55 +215,62 @@ def run_unsup1(args, logger):
 
             winners = firing_rates.argmax(dim=1)
             event_buffer = EventBatchBuffer()
-            episode_rewards = []
 
-            for b in range(input_spikes.size(0)):
-                prev = prev_winners[indices[b]].item()
-                r_stab_value = 0.0 if prev < 0 else (1.0 if winners[b].item() == prev else -1.0)
-                prev_winners[indices[b]] = winners[b]
+            prev_values = prev_winners[indices]
+            stable_mask = prev_values >= 0
+            r_stab = torch.where(
+                stable_mask & (winners == prev_values),
+                torch.tensor(1.0, device=device),
+                torch.tensor(0.0, device=device),
+            )
+            r_stab = torch.where(
+                stable_mask & (winners != prev_values), torch.tensor(-1.0, device=device), r_stab
+            )
+            prev_winners[indices] = winners
 
-                winner_counts[winners[b]] += 1
-                total_seen += 1
-                p = winner_counts / total_seen
-                uniform = 1.0 / args.N_E
-                r_div_value = -(p - uniform).pow(2).sum()
+            one_hot_winners = F.one_hot(winners, num_classes=args.N_E).to(dtype=winner_counts.dtype)
+            cumulative_counts = winner_counts.unsqueeze(0) + torch.cumsum(one_hot_winners, dim=0)
+            total_seen_tensor = torch.tensor(total_seen, device=device, dtype=winner_counts.dtype)
+            total_seen_per = total_seen_tensor + torch.arange(
+                1, winners.size(0) + 1, device=device, dtype=winner_counts.dtype
+            )
+            uniform = 1.0 / args.N_E
+            r_div = -((cumulative_counts / total_seen_per.unsqueeze(1) - uniform).pow(2).sum(dim=1))
 
-                total_reward = (
-                    args.alpha_sparse * r_sparse[b]
-                    + args.alpha_div * r_div_value
-                    + args.alpha_stab * torch.tensor(r_stab_value, device=device)
-                )
+            winner_counts += one_hot_winners.sum(dim=0)
+            total_seen += winners.size(0)
 
-                state_exc, extra_exc, pre_exc, post_exc = _gather_events(
-                    input_spikes[b : b + 1], exc_spikes[b : b + 1], network.w_input_exc, args.spike_array_len
-                )
-                state_inh, extra_inh, pre_inh, post_inh = _gather_events(
-                    inh_spikes[b : b + 1],
-                    exc_spikes[b : b + 1],
-                    network.w_inh_exc,
-                    args.spike_array_len,
-                    valid_mask=network.inh_exc_mask,
-                )
+            total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
-                if state_exc.numel() > 0:
-                    event_buffer.add(b, 0, state_exc, extra_exc, pre_exc, post_exc)
-                if state_inh.numel() > 0:
-                    event_buffer.add(b, 1, state_inh, extra_inh, pre_inh, post_inh)
+            state_exc, extra_exc, pre_exc, post_exc, batch_exc = _gather_events(
+                input_spikes, exc_spikes, network.w_input_exc, args.spike_array_len
+            )
+            state_inh, extra_inh, pre_inh, post_inh, batch_inh = _gather_events(
+                inh_spikes,
+                exc_spikes,
+                network.w_inh_exc,
+                args.spike_array_len,
+                valid_mask=network.inh_exc_mask,
+            )
 
-                episode_rewards.append(total_reward)
-                epoch_sparse.append(r_sparse[b].item())
-                epoch_div.append(r_div_value.item())
-                epoch_stab.append(r_stab_value)
-                epoch_total.append(total_reward.item())
+            if state_exc.numel() > 0:
+                event_buffer.add(indices[batch_exc], 0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
+            if state_inh.numel() > 0:
+                event_buffer.add(indices[batch_inh], 1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
+
+            epoch_sparse.extend(r_sparse.tolist())
+            epoch_div.extend(r_div.tolist())
+            epoch_stab.extend(r_stab.tolist())
+            epoch_total.extend(total_reward.tolist())
 
             if len(event_buffer) > 0:
-                states, extras, episode_ids, connection_ids, pre_idx, post_idx = event_buffer.flatten()
-                rewards_tensor = torch.stack(episode_rewards, dim=0)
+                states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
+                rewards_tensor = total_reward.detach()
 
                 actions, log_probs_old, values_old = _forward_in_event_batches(
                     actor, critic, states, extras, batch_size=args.event_batch_size
                 )
-                returns = rewards_tensor[episode_ids]
+                returns = rewards_tensor[batch_idx_events]
                 advantages = returns - values_old.detach()
 
                 ppo_update_events(

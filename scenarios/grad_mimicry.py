@@ -1,18 +1,27 @@
 import os
+import os
 from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
+import os
+from typing import List, Tuple
+
+import torch
+import torch.nn.functional as F
+from torch.func import functional_call, grad, vmap
+
 from data.mnist import get_mnist_dataloaders
-from rl.buffers import EpisodeBuffer
+from rl.buffers import EventBatchBuffer
 from rl.policy import GaussianPolicy
-from rl.ppo import ppo_update
+from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
 from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_grad_mimicry import GradMimicryNetwork
+from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
 
 
 def _ensure_metrics_file(path: str, header: str) -> None:
@@ -23,7 +32,7 @@ def _ensure_metrics_file(path: str, header: str) -> None:
 
 def _gather_events(
     pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int, l_norm: float
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = pre_spikes.device
     batch_size, n_pre, T = pre_spikes.shape
     n_post = post_spikes.shape[1]
@@ -31,25 +40,28 @@ def _gather_events(
     pad_post = F.pad(post_spikes, (L - 1, 0))
     idx_range = torch.arange(L, device=device)
 
-    histories, extras, pre_indices, post_indices = [], [], [], []
+    histories, extras, pre_indices, post_indices, batch_indices = [], [], [], [], []
 
     def _append_events(spike_tensor: torch.Tensor, is_pre_event: bool) -> None:
         indices = (spike_tensor == 1).nonzero(as_tuple=False)
         if indices.numel() == 0:
             return
+        base_batch = indices[:, 0]
+        base_idx = indices[:, 1]
+        time_idx = indices[:, 2]
         if is_pre_event:
-            batch_idx = indices[:, 0].repeat_interleave(n_post)
-            pre_idx = indices[:, 1].repeat_interleave(n_post)
+            batch_idx = base_batch.repeat_interleave(n_post)
+            pre_idx = base_idx.repeat_interleave(n_post)
             post_idx = torch.arange(n_post, device=device).repeat(indices.size(0))
             e_type = torch.tensor([1.0, 0.0], device=device)
             repeat_count = n_post
         else:
-            batch_idx = indices[:, 0].repeat_interleave(n_pre)
-            post_idx = indices[:, 1].repeat_interleave(n_pre)
+            batch_idx = base_batch.repeat_interleave(n_pre)
+            post_idx = base_idx.repeat_interleave(n_pre)
             pre_idx = torch.arange(n_pre, device=device).repeat(indices.size(0))
             e_type = torch.tensor([0.0, 1.0], device=device)
             repeat_count = n_pre
-        time_idx = indices[:, 2].repeat_interleave(repeat_count)
+        time_idx = time_idx.repeat_interleave(repeat_count)
         pos = time_idx + (L - 1)
         time_indices = pos.unsqueeze(1) - idx_range.view(1, -1)
         pre_hist = pad_pre[batch_idx.unsqueeze(1), pre_idx.unsqueeze(1), time_indices]
@@ -60,6 +72,7 @@ def _gather_events(
         extras.append(torch.cat([w_vals, l_norm_tensor, e_type.expand(w_vals.size(0), -1)], dim=1))
         pre_indices.append(pre_idx)
         post_indices.append(post_idx)
+        batch_indices.append(batch_idx)
 
     _append_events(pre_spikes, True)
     _append_events(post_spikes, False)
@@ -70,6 +83,7 @@ def _gather_events(
             torch.empty(0, 4, device=device),
             torch.empty(0, dtype=torch.long, device=device),
             torch.empty(0, dtype=torch.long, device=device),
+            torch.empty(0, dtype=torch.long, device=device),
         )
 
     return (
@@ -77,6 +91,7 @@ def _gather_events(
         torch.cat(extras, dim=0),
         torch.cat(pre_indices, dim=0),
         torch.cat(post_indices, dim=0),
+        torch.cat(batch_indices, dim=0),
     )
 
 
@@ -139,6 +154,7 @@ def run_grad(args, logger):
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
     layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
+    param_names = [name for name, _ in teacher.named_parameters()]
 
     metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
@@ -168,114 +184,107 @@ def run_grad(args, logger):
             batch_acc = (preds == labels).float().mean().item()
             epoch_acc.append(batch_acc)
 
-            batch_buffer = EpisodeBuffer()
+            event_buffer = EventBatchBuffer()
 
-            for b in range(input_spikes.size(0)):
-                states_all = []
-                extras_all = []
-                event_specs = []
+            prev_spikes = input_spikes
+            for li, hidden_spikes in enumerate(hidden_spikes_list):
+                events = _gather_events(prev_spikes, hidden_spikes, network.w_layers[li], args.spike_array_len, layer_norms[li])
+                if events[0].numel() > 0:
+                    batch_idx = events[4]
+                    event_buffer.add(batch_idx, li, events[0], events[1], events[2], events[3], batch_idx)
+                prev_spikes = hidden_spikes
 
-                pre_post_weights = []
-                prev_spikes = input_spikes[b : b + 1]
-                for li, hidden_spikes in enumerate(hidden_spikes_list):
-                    pre_post_weights.append((prev_spikes, hidden_spikes[b : b + 1], network.w_layers[li], layer_norms[li]))
-                    prev_spikes = hidden_spikes[b : b + 1]
-                pre_post_weights.append((prev_spikes, output_spikes[b : b + 1], network.w_layers[-1], layer_norms[-1]))
+            events_out = _gather_events(prev_spikes, output_spikes, network.w_layers[-1], args.spike_array_len, layer_norms[-1])
+            if events_out[0].numel() > 0:
+                batch_idx = events_out[4]
+                event_buffer.add(batch_idx, len(network.w_layers) - 1, events_out[0], events_out[1], events_out[2], events_out[3], batch_idx)
 
-                for idx, (pre_s, post_s, weight, l_norm) in enumerate(pre_post_weights):
-                    events = _gather_events(pre_s, post_s, weight, args.spike_array_len, l_norm)
-                    if events[0].numel() > 0:
-                        states_all.append(events[0])
-                        extras_all.append(events[1])
-                        event_specs.append((idx, events))
+            rewards = torch.zeros(input_spikes.size(0), device=device)
 
-                agent_deltas = [torch.zeros_like(w) for w in network.w_layers]
-                active_masks = [torch.zeros_like(w, dtype=torch.bool) for w in network.w_layers]
+            if len(event_buffer) > 0:
+                states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
+                actions, log_probs_old, _ = actor(states, extras)
+                values_old = critic(states, extras)
 
-                if states_all:
-                    states = torch.cat(states_all, dim=0)
-                    extras = torch.cat(extras_all, dim=0)
+                delta = args.local_lr * s_scen * actions.detach()
 
-                    action, log_prob, _ = actor(states, extras)
-                    value = critic(states, extras)
+                num_layers = len(network.w_layers)
+                batch_size = input_spikes.size(0)
+                agent_deltas = [torch.zeros((batch_size, *w.shape), device=device) for w in network.w_layers]
 
-                    offset = 0
-                    for idx, events in event_specs:
-                        count = events[0].size(0)
-                        idx_slice = slice(offset, offset + count)
-                        delta_mat = _scatter_updates(
-                            args.local_lr * s_scen * action[idx_slice], events[2], events[3], network.w_layers[idx]
-                        )
-                        agent_deltas[idx] = delta_mat
-                        active_masks[idx] = active_masks[idx] | (delta_mat != 0)
-                        delta_t_values.append(_extract_delta_t(events[0]).detach().cpu())
-                        delta_d_values.append(action[idx_slice].detach().cpu())
-                        offset += count
-
-                    episode_buffer = EpisodeBuffer()
-                    for i in range(states.size(0)):
-                        episode_buffer.append(states[i], extras[i], action[i], log_prob[i], value[i])
-                else:
-                    action = torch.empty(0, device=device)
-                    log_prob = torch.empty(0, device=device)
-                    value = torch.empty(0, device=device)
-                    episode_buffer = EpisodeBuffer()
+                for li in range(num_layers):
+                    layer_mask = connection_ids == li
+                    if layer_mask.any():
+                        batch_layer = batch_idx_events[layer_mask]
+                        pre_layer = pre_idx[layer_mask]
+                        post_layer = post_idx[layer_mask]
+                        delta_layer = delta[layer_mask]
+                        agent_deltas[li].index_put_((batch_layer, pre_layer, post_layer), delta_layer, accumulate=True)
 
                 teacher.load_state_dict(network.state_dict())
-                teacher.zero_grad()
-                hidden_teacher, output_teacher, firing_teacher = teacher(input_spikes[b : b + 1])
-                logits = firing_teacher * 5.0
-                loss_sup = F.cross_entropy(logits, labels[b : b + 1])
-                loss_sup.backward()
+                teacher_params = tuple(param.detach().requires_grad_(True) for param in teacher.parameters())
 
-                teacher_deltas = [
-                    -args.alpha_align * teacher.w_layers[i].grad for i in range(len(teacher.w_layers))
-                ]
+                def loss_fn(params, spikes, label):
+                    params_dict = {name: p for name, p in zip(param_names, params)}
+                    _, _, firing_teacher = functional_call(teacher, params_dict, (spikes.unsqueeze(0),))
+                    logits = firing_teacher * 5.0
+                    return F.cross_entropy(logits, label.unsqueeze(0))
 
-                squared_error_sum = torch.tensor(0.0, device=device)
-                active_count = torch.tensor(0, device=device, dtype=torch.long)
+                grad_fn = grad(loss_fn)
+                per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
+                teacher_deltas = [-args.alpha_align * g for g in per_sample_grads]
 
-                for i in range(len(agent_deltas)):
-                    mask = active_masks[i]
-                    diff = agent_deltas[i] - teacher_deltas[i]
-                    squared_error_sum = squared_error_sum + (diff.pow(2) * mask).sum()
-                    active_count = active_count + mask.sum()
+                squared_error_sum = torch.zeros(batch_size, device=device)
+                active_count = torch.zeros(batch_size, device=device)
 
-                align_loss = (
-                    squared_error_sum / active_count.float()
-                    if active_count.item() > 0
-                    else torch.tensor(0.0, device=device)
+                for li in range(num_layers):
+                    mask = agent_deltas[li] != 0
+                    diff = agent_deltas[li] - teacher_deltas[li]
+                    squared_error_sum = squared_error_sum + (diff.pow(2) * mask).sum(dim=(1, 2))
+                    active_count = active_count + mask.sum(dim=(1, 2))
+
+                align_loss = torch.where(
+                    active_count > 0,
+                    squared_error_sum / active_count.clamp_min(1).float(),
+                    torch.zeros_like(squared_error_sum),
                 )
-                reward = -align_loss
+                rewards = -align_loss
 
-                epoch_reward.append(reward.item())
-                epoch_align.append(reward.item())
+                returns = rewards.detach()[batch_idx_events]
+                advantages = returns - values_old.detach()
 
-                if len(episode_buffer) > 0:
-                    episode_buffer.finalize(reward)
-                    batch_buffer.extend(episode_buffer)
-
-                with torch.no_grad():
-                    for i in range(len(network.w_layers)):
-                        network.w_layers[i].add_(agent_deltas[i])
-                        network.w_layers[i].clamp_(args.exc_clip_min, args.exc_clip_max)
-
-                for a_d, t_d in zip(agent_deltas, teacher_deltas):
-                    agent_deltas_log.append(a_d.detach().cpu().flatten())
-                    teacher_deltas_log.append(t_d.detach().cpu().flatten())
-
-            if len(batch_buffer) > 0:
-                ppo_update(
+                ppo_update_events(
                     actor,
                     critic,
-                    batch_buffer,
+                    states,
+                    extras,
+                    actions.detach(),
+                    log_probs_old.detach(),
+                    returns.detach(),
+                    advantages.detach(),
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, len(batch_buffer)),
+                    batch_size=min(args.ppo_batch_size, states.size(0)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
                 )
+
+                with torch.no_grad():
+                    for li in range(num_layers):
+                        update_mat = agent_deltas[li].sum(dim=0)
+                        network.w_layers[li].add_(update_mat)
+                        network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
+
+                for li in range(num_layers):
+                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().cpu().flatten())
+                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().cpu().flatten())
+
+                delta_t_values.append(_extract_delta_t(states).detach().cpu())
+                delta_d_values.append(actions.detach().cpu())
+
+                epoch_reward.extend(rewards.tolist())
+                epoch_align.extend(rewards.tolist())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -286,6 +295,10 @@ def run_grad(args, logger):
                     len(train_loader),
                     batch_acc,
                 )
+
+            if rewards.numel() == 0:
+                epoch_reward.append(0.0)
+                epoch_align.append(0.0)
 
         mean_acc = sum(epoch_acc) / len(epoch_acc) if epoch_acc else 0.0
         mean_reward = sum(epoch_reward) / len(epoch_reward) if epoch_reward else 0.0
