@@ -61,18 +61,23 @@ class GradMimicryNetwork(nn.Module):
         s_prev: Tuple[Tensor, ...] = tuple(torch.zeros_like(v) for v in v_states)
         v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
 
-        hidden_spikes: Tuple[Tensor, ...] = tuple(
-            torch.empty((batch_size, h, 0), device=device, dtype=dtype) for h in self.hidden_sizes
-        )
-        output_spikes = torch.empty((batch_size, self.n_output, 0), device=device, dtype=dtype)
+        # Collect spikes in Python lists inside the timestep loop to avoid per-step
+        # tensor concatenations (torch.cat) that repeatedly reallocate memory and
+        # hurt GPU throughput. The lists are stacked once after the loop to build
+        # the full sequences while keeping the function pure for vmap/grad.
+        hidden_spike_lists: Tuple[list[Tensor], ...] = tuple([] for _ in self.hidden_sizes)
+        output_spike_list: list[Tensor] = []
 
         if n_hidden_layers == 0:
             for t in range(T):
                 x_t = input_spikes[:, :, t]
                 current_out = torch.matmul(x_t, torch.relu(self.w_layers[0]))
                 v_output, s_output = self.output_cell(v_output, current_out)
-                output_spikes = torch.cat((output_spikes, s_output.unsqueeze(-1)), dim=2)
+                output_spike_list.append(s_output)
 
+            output_spikes = torch.stack(output_spike_list, dim=2) if output_spike_list else torch.empty(
+                (batch_size, self.n_output, 0), device=device, dtype=dtype
+            )
             firing_rates = output_spikes.mean(dim=2)
             return [], output_spikes, firing_rates
 
@@ -95,16 +100,23 @@ class GradMimicryNetwork(nn.Module):
             current_out = torch.matmul(prev_spikes_for_output, torch.relu(self.w_layers[-1]))
             v_output, s_output = self.output_cell(v_output, current_out)
 
-            hidden_spikes = tuple(
-                torch.cat((seq, spike.unsqueeze(-1)), dim=2) for seq, spike in zip(hidden_spikes, new_spikes)
-            )
-            output_spikes = torch.cat((output_spikes, s_output.unsqueeze(-1)), dim=2)
+            for seq_list, spike in zip(hidden_spike_lists, new_spikes):
+                seq_list.append(spike)
+            output_spike_list.append(s_output)
 
             v_states = new_v_states
             s_prev = new_spikes
 
+        hidden_spikes = [
+            (torch.stack(seq_list, dim=2) if seq_list else torch.empty((batch_size, h, 0), device=device, dtype=dtype))
+            for seq_list, h in zip(hidden_spike_lists, self.hidden_sizes)
+        ]
+        output_spikes = torch.stack(output_spike_list, dim=2) if output_spike_list else torch.empty(
+            (batch_size, self.n_output, 0), device=device, dtype=dtype
+        )
+
         firing_rates = output_spikes.mean(dim=2)
-        return list(hidden_spikes), output_spikes, firing_rates
+        return hidden_spikes, output_spikes, firing_rates
 
     @property
     def synapse_shapes(self) -> List[Tuple[int, int]]:
