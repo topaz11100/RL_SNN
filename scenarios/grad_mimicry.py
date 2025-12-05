@@ -107,9 +107,9 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
     accuracies, rewards = [], []
     with torch.no_grad():
         for images, labels, _ in loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
             _, _, firing_rates = network(spikes)
             preds = firing_rates.argmax(dim=1)
             accuracies.append((preds == labels).float().mean().item())
@@ -175,9 +175,9 @@ def run_grad(args, logger):
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_reward, epoch_align = [], [], []
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
-            images = images.to(device)
-            labels = labels.to(device)
-            input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
 
             hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
 
