@@ -114,10 +114,25 @@ def run_grad(args, logger):
 
             event_buffer = EventBatchBuffer()
 
+            padded_cache = {}
+
+            def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+                """Pad once per spike tensor to avoid redundant F.pad calls across layers."""
+                key = id(spikes)
+                if key not in padded_cache:
+                    padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+                return padded_cache[key]
+
             prev_spikes = input_spikes
             for li, hidden_spikes in enumerate(hidden_spikes_list):
                 events = gather_events(
-                    prev_spikes, hidden_spikes, network.w_layers[li], args.spike_array_len, l_norm=layer_norms[li]
+                    prev_spikes,
+                    hidden_spikes,
+                    network.w_layers[li],
+                    args.spike_array_len,
+                    l_norm=layer_norms[li],
+                    padded_pre=_get_padded(prev_spikes),
+                    padded_post=_get_padded(hidden_spikes),
                 )
                 if events[0].numel() > 0:
                     batch_idx = events[4]
@@ -125,7 +140,13 @@ def run_grad(args, logger):
                 prev_spikes = hidden_spikes
 
             events_out = gather_events(
-                prev_spikes, output_spikes, network.w_layers[-1], args.spike_array_len, l_norm=layer_norms[-1]
+                prev_spikes,
+                output_spikes,
+                network.w_layers[-1],
+                args.spike_array_len,
+                l_norm=layer_norms[-1],
+                padded_pre=_get_padded(prev_spikes),
+                padded_post=_get_padded(output_spikes),
             )
             if events_out[0].numel() > 0:
                 batch_idx = events_out[4]
@@ -186,6 +207,7 @@ def run_grad(args, logger):
                 advantages = returns - values_old.detach()
 
                 full_event_batch = states.size(0)
+                ppo_mini_batch = min(args.ppo_batch_size, full_event_batch)
                 ppo_update_events(
                     actor,
                     critic,
@@ -198,7 +220,7 @@ def run_grad(args, logger):
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=full_event_batch,
+                    batch_size=ppo_mini_batch,  # Respect Theory/CLI mini-batch guidance
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
                 )

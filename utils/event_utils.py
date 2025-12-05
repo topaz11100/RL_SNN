@@ -27,6 +27,8 @@ def gather_events(
     *,
     l_norm: float | None = None,
     valid_mask: torch.Tensor | None = None,
+    padded_pre: torch.Tensor | None = None,
+    padded_post: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Collect sparse pre/post spike histories without building dense unfold buffers.
 
@@ -39,8 +41,10 @@ def gather_events(
     n_pre = pre_spikes.shape[1]
     n_post = post_spikes.shape[1]
 
-    padded_pre = F.pad(pre_spikes, (window - 1, 0))
-    padded_post = F.pad(post_spikes, (window - 1, 0))
+    # Allow callers to reuse already padded tensors to avoid redundant F.pad
+    # allocations when the same spike trains serve as pre/post across layers.
+    padded_pre = padded_pre if padded_pre is not None else F.pad(pre_spikes, (window - 1, 0))
+    padded_post = padded_post if padded_post is not None else F.pad(post_spikes, (window - 1, 0))
 
     states_list: list[torch.Tensor] = []
     extras_list: list[torch.Tensor] = []
