@@ -62,14 +62,14 @@ class EventBatchBuffer:
     연속적인 GPU 메모리 배치를 보장한다.
     """
 
-    def __init__(self, initial_capacity: int = 1024):
+    def __init__(self, initial_capacity: int = 4096):
+        # Generous preallocation minimizes cudaMalloc/cudaFree churn during training
         self.initial_capacity = initial_capacity
         self.capacity = 0
         self.length = 0
 
         self.states: torch.Tensor | None = None
         self.extras: torch.Tensor | None = None
-        self.episode_ids: torch.Tensor | None = None
         self.batch_indices: torch.Tensor | None = None
         self.connection_ids: torch.Tensor | None = None
         self.pre_indices: torch.Tensor | None = None
@@ -79,7 +79,6 @@ class EventBatchBuffer:
         self.capacity = max(self.initial_capacity, count)
         self.states = torch.empty((self.capacity, *state_shape[1:]), device=device, dtype=dtype)
         self.extras = torch.empty((self.capacity, extras_dim), device=device, dtype=extras_dtype)
-        self.episode_ids = torch.empty((self.capacity,), device=device, dtype=torch.long)
         self.batch_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
         self.connection_ids = torch.empty((self.capacity,), device=device, dtype=torch.long)
         self.pre_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
@@ -98,10 +97,6 @@ class EventBatchBuffer:
         )
         self.extras = torch.cat(
             [self.extras, torch.empty((new_capacity - self.capacity, self.extras.size(1)), device=self.extras.device, dtype=self.extras.dtype)],
-            dim=0,
-        )
-        self.episode_ids = torch.cat(
-            [self.episode_ids, torch.empty((new_capacity - self.capacity,), device=self.episode_ids.device, dtype=self.episode_ids.dtype)],
             dim=0,
         )
         self.batch_indices = torch.cat(
@@ -124,7 +119,6 @@ class EventBatchBuffer:
 
     def add(
         self,
-        episode_id,
         connection_id: int,
         states: torch.Tensor,
         extras: torch.Tensor,
@@ -147,14 +141,11 @@ class EventBatchBuffer:
         self.states[self.length : end] = states.detach()
         if extras.numel() > 0:
             self.extras[self.length : end] = extras.detach()
-        if torch.is_tensor(episode_id):
-            episode_tensor = episode_id.to(device=device, dtype=torch.long)
-        else:
-            episode_tensor = torch.full((count,), episode_id, device=device, dtype=torch.long)
-        self.episode_ids[self.length : end] = episode_tensor
         self.connection_ids[self.length : end] = connection_id
         self.pre_indices[self.length : end] = pre_idx
         self.post_indices[self.length : end] = post_idx
+        # batch_idx must be local to the current mini-batch (0..batch_size-1) to keep
+        # reward/advantage lookups aligned during PPO updates.
         self.batch_indices[self.length : end] = batch_idx.to(device=device, dtype=torch.long)
         self.length = end
 
@@ -162,17 +153,20 @@ class EventBatchBuffer:
         if self.states is None or self.length == 0:
             if allow_empty:
                 empty = torch.empty(0)
-                return empty, empty, empty, empty, empty, empty, empty
+                return empty, empty, empty, empty, empty, empty
             raise ValueError("No events were added to the buffer")
 
         states = self.states[: self.length]
         extras = self.extras[: self.length]
-        episode_ids = self.episode_ids[: self.length]
         connection_ids = self.connection_ids[: self.length]
         pre_idx = self.pre_indices[: self.length]
         post_idx = self.post_indices[: self.length]
         batch_idx = self.batch_indices[: self.length]
-        return states, extras, episode_ids, connection_ids, pre_idx, post_idx, batch_idx
+        return states, extras, connection_ids, pre_idx, post_idx, batch_idx
+
+    def reset(self) -> None:
+        """Reuse the allocated storage without freeing GPU memory."""
+        self.length = 0
 
     def __len__(self) -> int:
         return self.length
