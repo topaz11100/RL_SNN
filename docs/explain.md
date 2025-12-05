@@ -211,6 +211,7 @@
     - **역할**: Poisson 인코딩된 MNIST를 입력으로 에이전트 네트워크를 시뮬레이션하고, 입력→은닉/은닉→출력 이벤트별 로컬 상태(히스토리, 현재 가중치, 정규화된 레이어 인덱스, 이벤트 타입)를 통해 Δd를 산출해 각 시냅스에 개별적으로 적용한다. 에피소드 동안 누적된 에이전트 업데이트 `Δw_agent`와 Teacher 역할을 하는 함수형 호출의 per-sample gradient `Δw_teacher` 간 제곱 오차 평균을 보상으로 사용하며, 이미지 미니배치 단위로 PPO Actor–Critic을 학습한다.
     - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. PPO 업데이트는 `ppo_batch_size`와 이벤트 수를 비교해 미니배치 단위로 진행해 `Theory.md` 2.9.3/2.9.4의 배치 요구를 충족한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다. 이벤트 수집은 `gather_events`의 블록 기반 희소 윈도우 선택과 레이어 정규화 스칼라(`l_norm`)를 extras에 포함하는 방식으로 통일하며, 동일 스파이크열을 pre/post로 재사용할 때는 패딩 캐시를 공유해 중복 `F.pad`를 줄인다. 이벤트 버퍼는 에포크 외부에서 한 번만 생성하고 배치마다 `reset()`하여 GPU 재할당을 없앤다.
     - **최적화**: Teacher per-sample gradient는 별도 네트워크 복사 없이 `torch.func.functional_call`에 `network`의 파라미터를 `detach().requires_grad_(True)`로 묶어 전달해 수행한다. 이를 `vmap(grad(loss_fn))`으로 평가해 파라미터 복사 및 load_state_dict 호출을 제거했다. 네트워크 forward는 사전 할당된 출력 버퍼를 사용해 동기화를 줄이고, 보상·정렬 통계 및 델타 히스토리는 GPU에 유지한 채 에포크 종료 후에만 CPU로 이동해 로그/시각화를 수행한다.
+    - **dtype 일관성**: Agent 델타와 정렬 보상 누적 버퍼를 가중치 dtype으로 초기화해 float16/float32 혼합 환경에서도 추가 캐스팅 없이 GPU에서 곧바로 합산된다.
     - **Theory 연계**: 시나리오 3의 gradient mimicry 학습 루프.
 
 ## main.py
