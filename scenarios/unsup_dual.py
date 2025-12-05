@@ -13,15 +13,8 @@ from rl.value import ValueFunction
 from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_diehl_cook import DiehlCookNetwork
+from utils.event_utils import gather_events
 from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
-
-
-_EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
-_EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
-
-
-def _expand_event_type(base: torch.Tensor, count: int, device, dtype) -> torch.Tensor:
-    return base.to(device=device, dtype=dtype).expand(count, -1)
 
 
 def _ensure_metrics_file(path: str) -> None:
@@ -42,105 +35,6 @@ def _compute_sparse_reward(exc_spikes: torch.Tensor, rho_target: float) -> Tuple
     return r_sparse, firing_rates
 
 
-def _gather_events(
-    pre_spikes: torch.Tensor,
-    post_spikes: torch.Tensor,
-    weights: torch.Tensor,
-    L: int,
-    valid_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    device = pre_spikes.device
-    batch_size, n_pre, T = pre_spikes.shape
-    n_post = post_spikes.shape[1]
-
-    pad_pre = F.pad(pre_spikes, (L - 1, 0))
-    pad_post = F.pad(post_spikes, (L - 1, 0))
-    pre_windows = pad_pre.unfold(2, L, 1)
-    post_windows = pad_post.unfold(2, L, 1)
-
-    states_list = []
-    extras_list = []
-    pre_indices_list = []
-    post_indices_list = []
-    batch_indices_list = []
-
-    # Optimized: build events only for real spikes to avoid large expanded tensors.
-    pre_events = pre_spikes.nonzero(as_tuple=False)
-    if pre_events.numel() > 0:
-        batch_pre = pre_events[:, 0].repeat_interleave(n_post)
-        pre_idx = pre_events[:, 1].repeat_interleave(n_post)
-        time_idx = pre_events[:, 2].repeat_interleave(n_post)
-        post_idx = torch.arange(n_post, device=device).repeat(pre_events.size(0))
-
-        if valid_mask is not None:
-            keep_mask = valid_mask[pre_idx, post_idx]
-            keep = keep_mask.nonzero(as_tuple=False).squeeze(1)
-            batch_pre = batch_pre.index_select(0, keep)
-            pre_idx = pre_idx.index_select(0, keep)
-            time_idx = time_idx.index_select(0, keep)
-            post_idx = post_idx.index_select(0, keep)
-
-        if pre_idx.numel() > 0:
-            pre_hist = pre_windows[batch_pre, pre_idx, time_idx]
-            post_hist = post_windows[batch_pre, post_idx, time_idx]
-            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
-
-            weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
-            event_type = _expand_event_type(_EVENT_TYPE_PRE, weights_pre.size(0), device, weights.dtype)
-            extras_list.append(torch.cat([weights_pre, event_type], dim=1))
-
-            pre_indices_list.append(pre_idx)
-            post_indices_list.append(post_idx)
-            batch_indices_list.append(batch_pre)
-
-    post_events = post_spikes.nonzero(as_tuple=False)
-    if post_events.numel() > 0:
-        batch_post = post_events[:, 0].repeat_interleave(n_pre)
-        post_idx = post_events[:, 1].repeat_interleave(n_pre)
-        time_idx = post_events[:, 2].repeat_interleave(n_pre)
-        pre_idx = torch.arange(n_pre, device=device).repeat(post_events.size(0))
-
-        if valid_mask is not None:
-            keep_mask = valid_mask[pre_idx, post_idx]
-            keep = keep_mask.nonzero(as_tuple=False).squeeze(1)
-            batch_post = batch_post.index_select(0, keep)
-            pre_idx = pre_idx.index_select(0, keep)
-            time_idx = time_idx.index_select(0, keep)
-            post_idx = post_idx.index_select(0, keep)
-
-        if pre_idx.numel() > 0:
-            pre_hist = pre_windows[batch_post, pre_idx, time_idx]
-            post_hist = post_windows[batch_post, post_idx, time_idx]
-            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
-
-            weights_post = weights[pre_idx, post_idx].unsqueeze(1)
-            event_type = _expand_event_type(_EVENT_TYPE_POST, weights_post.size(0), device, weights.dtype)
-            extras_list.append(torch.cat([weights_post, event_type], dim=1))
-
-            pre_indices_list.append(pre_idx)
-            post_indices_list.append(post_idx)
-            batch_indices_list.append(batch_post)
-
-    if not states_list:
-        empty_state = torch.empty((0, 2, L), device=device, dtype=pre_spikes.dtype)
-        empty_extras = torch.empty((0, 3), device=device, dtype=weights.dtype)
-        empty_index = torch.empty((0,), device=device, dtype=torch.long)
-        return empty_state, empty_extras, empty_index, empty_index, empty_index
-
-    if len(states_list) == 1:
-        states_cat = states_list[0]
-        extras_cat = extras_list[0]
-        pre_cat = pre_indices_list[0]
-        post_cat = post_indices_list[0]
-        batch_cat = batch_indices_list[0]
-    else:
-        states_cat = torch.cat(states_list, dim=0)
-        extras_cat = torch.cat(extras_list, dim=0)
-        pre_cat = torch.cat(pre_indices_list, dim=0)
-        post_cat = torch.cat(post_indices_list, dim=0)
-        batch_cat = torch.cat(batch_indices_list, dim=0)
-
-    return states_cat, extras_cat, pre_cat, post_cat, batch_cat
 
 
 def _scatter_updates(
@@ -256,10 +150,10 @@ def run_unsup2(args, logger):
 
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
-            state_exc, extra_exc, pre_exc, post_exc, batch_exc = _gather_events(
+            state_exc, extra_exc, pre_exc, post_exc, batch_exc = gather_events(
                 input_spikes, exc_spikes, network.w_input_exc, args.spike_array_len
             )
-            state_inh, extra_inh, pre_inh, post_inh, batch_inh = _gather_events(
+            state_inh, extra_inh, pre_inh, post_inh, batch_inh = gather_events(
                 inh_spikes,
                 exc_spikes,
                 network.w_inh_exc,

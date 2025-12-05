@@ -72,6 +72,8 @@ def ppo_update_events(
     """PPO update using flattened event batches."""
 
     num_samples = states.size(0)
+    if num_samples == 0:
+        return
     extras_available = extras.numel() > 0
 
     for _ in range(ppo_epochs):

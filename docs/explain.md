@@ -32,6 +32,12 @@
   - **출력**: 설정된 `Logger` 객체.
   - **Theory 연계**: 텍스트 기반 로그 저장 요구를 충족.
 
+### utils/event_utils.py
+- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
+  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 **희소 인덱스(`nonzero`) 기반 advanced indexing**으로 수집한다. `unfold`를 사용해 `(batch, neurons, T, L)` 조각을 생성하던 방식 대신, 패딩된 텐서에서 필요한 위치만 모아 GPU 메모리 사용량을 크게 줄였다.
+  - **출력**: `(states, extras, pre_idx, post_idx, batch_idx)` 형태로, `extras`에는 가중치(+선택적 레이어 정규화 스칼라)+이벤트 타입 원핫이 포함된다.
+  - **Theory 연계/최적화**: 스파이크 희소성을 활용해 OOM 위험을 없애고 GPU 친화적인 히스토리 수집을 제공한다.
+
 ## data 모듈
 ### data/mnist.py
 - `get_mnist_dataloaders(batch_size_images: int, seed: int) -> Tuple[DataLoader, DataLoader, DataLoader]`
@@ -152,6 +158,9 @@
   - **역할**: 버퍼에 저장된 상태·추가 특징·행동을 섞어가며 클립드 PPO 손실과 가치 MSE를 계산, 두 네트워크를 각각 업데이트한다. 추가 특징은 버퍼 내부에 포함되어 관리한다.
   - **출력**: 없음.
   - **Theory 연계**: `Theory.md` 2.9절의 PPO Actor 손실 `-min(rA, clip(r)A)`와 Critic MSE 구현.
+- `ppo_update_events(actor: nn.Module, critic: nn.Module, states: torch.Tensor, extras: torch.Tensor, actions_old: torch.Tensor, log_probs_old: torch.Tensor, returns: torch.Tensor, advantages: torch.Tensor, optimizer_actor: torch.optim.Optimizer, optimizer_critic: torch.optim.Optimizer, ppo_epochs: int, batch_size: int, eps_clip: float = 0.2, c_v: float = 1.0)`
+  - **역할**: 이벤트 히스토리 배치를 바로 받아 PPO 업데이트를 수행한다. 입력이 비어 있을 때는 즉시 반환해 보상 계산 흐름을 끊지 않고 GPU/CPU 동기화를 피한다.
+  - **Theory 연계**: 이미지 단위 이벤트 미니배치 업데이트(Theory 2.9.3)를 안전하게 수행.
 
 ## scenarios 모듈
 ### scenarios/unsup_single.py
@@ -160,7 +169,7 @@
   - **Theory 연계**: 결과 텍스트 로그 요구.
 - `run_unsup1(args, logger)`
   - **역할**: MNIST 로딩, Poisson 인코딩, Diehl–Cook 네트워크 시뮬레이션, 이벤트별 로컬 상태(전/후 스파이크 히스토리, 현재 가중치, 이벤트 타입) 수집, per-image 안정성 보상(데이터셋 인덱스 기반 winner 추적 포함)과 희소성/다양성 보상 합산, 에피소드 버퍼 병합 후 PPO 업데이트, 메트릭 로깅까지 한 에포크 루프 수행.
-  - **세부 구현**: 에포크 루프 시작 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출을 `Δw = args.local_lr * s_scen * action` 구조로 적용해 `AGENTS.md` 5.3.2절의 로컬 학습률 수식을 명시적으로 따른다.
+  - **세부 구현**: 에포크 루프 시작 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출을 `Δw = args.local_lr * s_scen * action` 구조로 적용해 `AGENTS.md` 5.3.2절의 로컬 학습률 수식을 명시적으로 따른다. 스파이크 히스토리는 `utils.event_utils.gather_events`의 희소 인덱싱 경로를 사용해 OOM을 방지한다.
   - **최적화**: 보상과 발화율 통계를 GPU 텐서로 누적하고 에포크 종료 시 한 번만 CPU로 이동시켜 평균을 계산해 배치 단위 동기화를 줄였다.
   - **출력**: 없음(로그/파일 기록).
   - **Theory 연계**: 시나리오 1.1 전체 학습 흐름 구현.
@@ -170,7 +179,7 @@
   - **역할**: 비지도 이중 정책 메트릭 헤더 생성.
 - `run_unsup2(args, logger)`
   - **역할**: 두 정책(흥분/억제)으로 Poisson 인코딩된 배치를 처리하고, 전/후 스파이크 히스토리·가중치·이벤트 타입으로 구성한 로컬 상태를 이벤트별로 수집한다. 각 이미지에 대해 희소성/다양성/안정성 보상을 계산해 에피소드 버퍼에 채운 뒤, 미니배치 전체를 대상으로 PPO 업데이트를 수행하며 메트릭을 기록한다.
-  - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 설정하고, 흥분/억제 경로 모두 `_scatter_updates`에 `args.local_lr * s_scen * action`을 전달해 로컬 업데이트가 문서상의 `η_w * s_scen * Δd_i(t)` 형식을 유지한다.
+  - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 설정하고, 흥분/억제 경로 모두 `_scatter_updates`에 `args.local_lr * s_scen * action`을 전달해 로컬 업데이트가 문서상의 `η_w * s_scen * Δd_i(t)` 형식을 유지한다. 히스토리 수집은 `gather_events`의 희소 인덱스 버퍼를 사용해 두 경로 모두 메모리 사용을 제한한다.
   - **최적화**: 보상/발화 통계를 GPU 텐서로 유지하고 delta_t/delta_d 히스토리 역시 에포크 종료 시점에만 CPU로 옮겨 기록해 배치마다의 동기화를 제거했다.
   - **Theory 연계**: 시나리오 1.2의 분리된 정책 학습 파이프라인.
 
@@ -185,7 +194,7 @@
   - **Theory 연계**: 준지도 시나리오 평가 절차.
 - `run_semi(args, logger)`
   - **역할**: Poisson 인코딩된 MNIST와 라벨을 사용해 네트워크 시뮬레이션, 출력 이벤트별 로컬 상태(히스토리+가중치+이벤트 타입)를 통해 행동을 산출하고 가중치를 개별적으로 업데이트한다. 각 이미지의 분류 보상을 에피소드 버퍼에 담아 미니배치 단위로 PPO를 업데이트하며 train/val/test 메트릭을 기록한다.
-  - **세부 구현**: 에포크 시작에 `s_scen = 1.0`을 선언하고 입력/은닉→출력 경로 모두 `_scatter_updates` 호출을 `args.local_lr * s_scen * action` 형태로 통일해 로컬 학습률 수식을 충족하며, 각 업데이트 후 가중치를 지정 범위로 클리핑한다.
+  - **세부 구현**: 에포크 시작에 `s_scen = 1.0`을 선언하고 입력/은닉→출력 경로 모두 `_scatter_updates` 호출을 `args.local_lr * s_scen * action` 형태로 통일해 로컬 학습률 수식을 충족하며, 각 업데이트 후 가중치를 지정 범위로 클리핑한다. 로컬 상태 구성은 `gather_events` 기반이라 희소 스파이크만을 대상으로 한다.
   - **최적화**: 정확도·마진·보상을 GPU 텐서로 누적한 뒤 에포크 종료 시 집계해 CPU 동기화 비용을 최소화한다.
   - **Theory 연계**: 시나리오 2 학습 루프.
 
@@ -196,7 +205,7 @@
   - **역할**: 발화율 기반 예측 정확도와 마진 기반 보상 근사치를 평가.
 - `run_grad(args, logger)`
   - **역할**: Poisson 인코딩된 MNIST를 입력으로 에이전트/Teacher 네트워크를 모두 시뮬레이션하고, 입력→은닉/은닉→출력 이벤트별 로컬 상태(히스토리, 현재 가중치, 정규화된 레이어 인덱스, 이벤트 타입)를 통해 Δd를 산출해 각 시냅스에 개별적으로 적용한다. 에피소드 동안 누적된 에이전트 업데이트 `Δw_agent`와 Teacher 업데이트 `Δw_teacher` 간 제곱 오차 평균을 보상으로 사용하며, 이미지 미니배치 단위로 PPO Actor–Critic을 학습한다.
-  - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다.
+  - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다. 이벤트 수집은 `gather_events`의 희소 윈도우 선택과 레이어 정규화 스칼라(`l_norm`)를 extras에 포함하는 방식으로 통일했다.
   - **최적화**: vmap 호환을 위해 forward에서 in-place 상태 갱신을 제거하고, 보상·정렬 통계 및 델타 히스토리를 GPU에 유지한 채 에포크 종료 후에만 CPU로 이동해 로그/시각화를 수행한다.
   - **Theory 연계**: 시나리오 3의 gradient mimicry 학습 루프.
 
