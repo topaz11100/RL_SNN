@@ -76,14 +76,14 @@ def run_grad(args, logger):
 
     lif_params = LIFParams(dt=args.dt)
     network = GradMimicryNetwork(hidden_params=lif_params, output_params=lif_params).to(device)
-    teacher = GradMimicryNetwork(hidden_params=lif_params, output_params=lif_params).to(device)
     actor = GaussianPolicy(sigma=getattr(args, "sigma_sup", args.sigma_unsup1), extra_feature_dim=4).to(device)
     critic = ValueFunction(extra_feature_dim=4).to(device)
     optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr_actor)
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
     layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
-    param_names = [name for name, _ in teacher.named_parameters()]
+    param_names = [name for name, _ in network.named_parameters()]
+    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
 
     metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
@@ -113,7 +113,7 @@ def run_grad(args, logger):
             batch_acc_tensor = (preds == labels).float().mean()
             epoch_acc.append(batch_acc_tensor.detach())
 
-            event_buffer = EventBatchBuffer()
+            event_buffer.reset()
 
             padded_cache = {}
 
@@ -137,7 +137,7 @@ def run_grad(args, logger):
                 )
                 if events[0].numel() > 0:
                     batch_idx = events[4]
-                    event_buffer.add(batch_idx, li, events[0], events[1], events[2], events[3], batch_idx)
+                    event_buffer.add(li, events[0], events[1], events[2], events[3], batch_idx)
                 prev_spikes = hidden_spikes
 
             events_out = gather_events(
@@ -151,12 +151,12 @@ def run_grad(args, logger):
             )
             if events_out[0].numel() > 0:
                 batch_idx = events_out[4]
-                event_buffer.add(batch_idx, len(network.w_layers) - 1, events_out[0], events_out[1], events_out[2], events_out[3], batch_idx)
+                event_buffer.add(len(network.w_layers) - 1, events_out[0], events_out[1], events_out[2], events_out[3], batch_idx)
 
             rewards = torch.zeros(input_spikes.size(0), device=device)
 
             if len(event_buffer) > 0:
-                states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
+                states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
                 actions, log_probs_old, _ = actor(states, extras)
                 values_old = critic(states, extras)
 
@@ -175,12 +175,11 @@ def run_grad(args, logger):
                         delta_layer = delta[layer_mask]
                         agent_deltas[li].index_put_((batch_layer, pre_layer, post_layer), delta_layer, accumulate=True)
 
-                teacher.load_state_dict(network.state_dict())
-                teacher_params = tuple(param.detach().requires_grad_(True) for param in teacher.parameters())
+                teacher_params = tuple(param.detach().requires_grad_(True) for param in network.parameters())
 
                 def loss_fn(params, spikes, label):
                     params_dict = {name: p for name, p in zip(param_names, params)}
-                    _, _, firing_teacher = functional_call(teacher, params_dict, (spikes.unsqueeze(0),))
+                    _, _, firing_teacher = functional_call(network, params_dict, (spikes.unsqueeze(0),))
                     logits = firing_teacher * 5.0
                     return F.cross_entropy(logits, label.unsqueeze(0))
 

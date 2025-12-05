@@ -83,7 +83,7 @@ def run_unsup2(args, logger):
     base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
     prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
     winner_counts = torch.zeros(args.N_E, device=device)
-    total_seen = 0.0
+    total_seen = torch.zeros((), device=device, dtype=winner_counts.dtype)
 
     lif_params = LIFParams(dt=args.dt)
     network = DiehlCookNetwork(n_exc=args.N_E, n_inh=args.N_E, exc_params=lif_params, inh_params=lif_params).to(device)
@@ -106,6 +106,8 @@ def run_unsup2(args, logger):
     _ensure_metrics_file(metrics_path)
     _ensure_eval_file(metrics_val)
     _ensure_eval_file(metrics_test)
+
+    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
 
     s_scen = 1.0
     delta_t_exc = []
@@ -138,15 +140,14 @@ def run_unsup2(args, logger):
 
             one_hot_winners = F.one_hot(winners, num_classes=args.N_E).to(dtype=winner_counts.dtype)
             cumulative_counts = winner_counts.unsqueeze(0) + torch.cumsum(one_hot_winners, dim=0)
-            total_seen_tensor = torch.tensor(total_seen, device=device, dtype=winner_counts.dtype)
-            total_seen_per = total_seen_tensor + torch.arange(
+            total_seen_per = total_seen + torch.arange(
                 1, winners.size(0) + 1, device=device, dtype=winner_counts.dtype
             )
             uniform = 1.0 / args.N_E
             r_div = -((cumulative_counts / total_seen_per.unsqueeze(1) - uniform).pow(2).sum(dim=1))
 
             winner_counts += one_hot_winners.sum(dim=0)
-            total_seen += winners.size(0)
+            total_seen.add_(winners.size(0))
 
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
@@ -161,11 +162,11 @@ def run_unsup2(args, logger):
                 valid_mask=network.inh_exc_mask,
             )
 
-            event_buffer = EventBatchBuffer()
+            event_buffer.reset()
             if state_exc.numel() > 0:
-                event_buffer.add(indices[batch_exc], 0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
+                event_buffer.add(0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
             if state_inh.numel() > 0:
-                event_buffer.add(indices[batch_inh], 1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
+                event_buffer.add(1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
 
             epoch_sparse.append(r_sparse.detach())
             epoch_div.append(r_div.detach())
@@ -173,7 +174,7 @@ def run_unsup2(args, logger):
             epoch_total.append(total_reward.detach())
 
             if len(event_buffer) > 0:
-                states, extras, _, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
+                states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
                 rewards_tensor = total_reward.detach()
 
                 # Excitatory pathway

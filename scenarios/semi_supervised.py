@@ -102,6 +102,7 @@ def run_semi(args, logger):
 
     delta_t_values = []
     delta_d_values = []
+    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
 
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
@@ -118,6 +119,7 @@ def run_semi(args, logger):
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
+            event_buffer.reset()
             state_in, extra_in, pre_in, post_in, batch_in = gather_events(
                 input_spikes, hidden_spikes, network.w_input_hidden, args.spike_array_len
             )
@@ -125,14 +127,13 @@ def run_semi(args, logger):
                 hidden_spikes, output_spikes, network.w_hidden_output, args.spike_array_len
             )
 
-            event_buffer = EventBatchBuffer()
             if state_in.numel() > 0:
-                event_buffer.add(batch_in, 0, state_in, extra_in, pre_in, post_in, batch_in)
+                event_buffer.add(0, state_in, extra_in, pre_in, post_in, batch_in)
             if state_out.numel() > 0:
-                event_buffer.add(batch_out, 1, state_out, extra_out, pre_out, post_out, batch_out)
+                event_buffer.add(1, state_out, extra_out, pre_out, post_out, batch_out)
 
             if len(event_buffer) > 0:
-                states, extras, _, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
+                states, extras, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
                 actions, log_probs_old, _ = actor(states, extras)
                 values_old = critic(states, extras)
 
