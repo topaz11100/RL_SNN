@@ -99,8 +99,11 @@ class EventBatchBuffer:
         self.batch_indices.append(batch_idx.to(device=device, dtype=torch.long))
         self._length += count
 
-    def flatten(self) -> Tuple[torch.Tensor, ...]:
+    def flatten(self, allow_empty: bool = False) -> Tuple[torch.Tensor, ...]:
         if not self.states:
+            if allow_empty:
+                empty = torch.empty(0)
+                return empty, empty, empty, empty, empty, empty, empty
             raise ValueError("No events were added to the buffer")
         states = torch.cat(self.states, dim=0)
         extras = torch.cat(self.extra_features, dim=0) if self.extra_features else torch.empty(0, device=states.device)

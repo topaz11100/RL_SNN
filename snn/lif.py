@@ -39,6 +39,7 @@ def lif_dynamics(
 
     spikes_detached = spikes.detach()
     v_reset = torch.full_like(v_next, params.v_reset)
+    # Hard reset to v_reset when a spike occurs (Theory.md §2.2 hard reset rule).
     v_after_reset = torch.where(spikes_detached.bool(), v_reset, v_next)
 
     return v_after_reset, spikes

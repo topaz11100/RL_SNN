@@ -13,75 +13,14 @@ from rl.value import ValueFunction
 from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_grad_mimicry import GradMimicryNetwork
+from utils.event_utils import gather_events
 from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
-
-
-_EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
-_EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
-
-
-def _expand_event_type(base: torch.Tensor, count: int, device, dtype) -> torch.Tensor:
-    return base.to(device=device, dtype=dtype).expand(count, -1)
 
 
 def _ensure_metrics_file(path: str, header: str) -> None:
     if not os.path.exists(path):
         with open(path, "w") as f:
             f.write(header + "\n")
-
-
-def _gather_events(
-    pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, L: int, l_norm: float
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    device = pre_spikes.device
-    batch_size, n_pre, T = pre_spikes.shape
-    n_post = post_spikes.shape[1]
-
-    pad_pre = F.pad(pre_spikes, (L - 1, 0))
-    pad_post = F.pad(post_spikes, (L - 1, 0))
-    pre_windows = pad_pre.unfold(2, L, 1)
-    post_windows = pad_post.unfold(2, L, 1)
-
-    def _build_events(mask: torch.Tensor, is_pre: bool):
-        b_idx, main_idx, t_idx = torch.where(mask)
-        repeat_count = n_post if is_pre else n_pre
-
-        batch_rep = b_idx.repeat_interleave(repeat_count)
-        main_rep = main_idx.repeat_interleave(repeat_count)
-        time_rep = t_idx.repeat_interleave(repeat_count)
-
-        other_idx = torch.arange(n_post if is_pre else n_pre, device=device)
-        other_rep = other_idx.repeat(b_idx.numel())
-
-        pre_ids = main_rep if is_pre else other_rep
-        post_ids = other_rep if is_pre else main_rep
-
-        pre_hist = pre_windows[batch_rep, pre_ids, time_rep]
-        post_hist = post_windows[batch_rep, post_ids, time_rep]
-        states = torch.stack((pre_hist, post_hist), dim=1)
-
-        selected_weights = weights[pre_ids, post_ids].unsqueeze(1)
-        l_norm_tensor = torch.full_like(selected_weights, l_norm)
-        event_type = _expand_event_type(
-            _EVENT_TYPE_PRE if is_pre else _EVENT_TYPE_POST,
-            selected_weights.size(0),
-            device,
-            weights.dtype,
-        )
-        extras = torch.cat((selected_weights, l_norm_tensor, event_type), dim=1)
-
-        return states, extras, pre_ids, post_ids, batch_rep
-
-    states_pre, extras_pre, pre_idx_pre, post_idx_pre, batch_pre = _build_events(pre_spikes > 0, True)
-    states_post, extras_post, pre_idx_post, post_idx_post, batch_post = _build_events(post_spikes > 0, False)
-
-    states_cat = torch.cat((states_pre, states_post), dim=0)
-    extras_cat = torch.cat((extras_pre, extras_post), dim=0)
-    pre_cat = torch.cat((pre_idx_pre, pre_idx_post), dim=0)
-    post_cat = torch.cat((post_idx_pre, post_idx_post), dim=0)
-    batch_cat = torch.cat((batch_pre, batch_post), dim=0)
-
-    return states_cat, extras_cat, pre_cat, post_cat, batch_cat
 
 
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -177,13 +116,17 @@ def run_grad(args, logger):
 
             prev_spikes = input_spikes
             for li, hidden_spikes in enumerate(hidden_spikes_list):
-                events = _gather_events(prev_spikes, hidden_spikes, network.w_layers[li], args.spike_array_len, layer_norms[li])
+                events = gather_events(
+                    prev_spikes, hidden_spikes, network.w_layers[li], args.spike_array_len, l_norm=layer_norms[li]
+                )
                 if events[0].numel() > 0:
                     batch_idx = events[4]
                     event_buffer.add(batch_idx, li, events[0], events[1], events[2], events[3], batch_idx)
                 prev_spikes = hidden_spikes
 
-            events_out = _gather_events(prev_spikes, output_spikes, network.w_layers[-1], args.spike_array_len, layer_norms[-1])
+            events_out = gather_events(
+                prev_spikes, output_spikes, network.w_layers[-1], args.spike_array_len, l_norm=layer_norms[-1]
+            )
             if events_out[0].numel() > 0:
                 batch_idx = events_out[4]
                 event_buffer.add(batch_idx, len(network.w_layers) - 1, events_out[0], events_out[1], events_out[2], events_out[3], batch_idx)
@@ -279,16 +222,6 @@ def run_grad(args, logger):
                 zero_reward = torch.zeros(input_spikes.size(0), device=device)
                 epoch_reward.append(zero_reward.detach())
                 epoch_align.append(zero_reward.detach())
-
-            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
-                logger.info(
-                    "Epoch %d/%d | Batch %d/%d | Train acc %.4f",
-                    epoch,
-                    args.num_epochs,
-                    batch_idx,
-                    len(train_loader),
-                    batch_acc_tensor.item(),
-                )
 
         mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
         reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
