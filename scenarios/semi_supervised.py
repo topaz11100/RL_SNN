@@ -6,9 +6,6 @@ import torch.nn.functional as F
 
 from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
 
-import os
-from typing import Tuple
-
 import torch
 import torch.nn.functional as F
 
@@ -21,6 +18,14 @@ from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_semi_supervised import SemiSupervisedNetwork
 from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
+
+
+_EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
+_EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
+
+
+def _expand_event_type(base: torch.Tensor, count: int, device, dtype) -> torch.Tensor:
+    return base.to(device=device, dtype=dtype).expand(count, -1)
 
 
 def _ensure_metrics_file(path: str, header: str) -> None:
@@ -60,7 +65,7 @@ def _gather_events(
         states_list.append(torch.stack([pre_hist, post_hist], dim=1))
 
         weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
-        event_type = torch.tensor([1.0, 0.0], device=device, dtype=weights.dtype).expand(weights_pre.size(0), -1)
+        event_type = _expand_event_type(_EVENT_TYPE_PRE, weights_pre.size(0), device, weights.dtype)
         extras_list.append(torch.cat([weights_pre, event_type], dim=1))
 
         pre_indices_list.append(pre_idx)
@@ -79,7 +84,7 @@ def _gather_events(
         states_list.append(torch.stack([pre_hist, post_hist], dim=1))
 
         weights_post = weights[pre_idx, post_idx].unsqueeze(1)
-        event_type = torch.tensor([0.0, 1.0], device=device, dtype=weights.dtype).expand(weights_post.size(0), -1)
+        event_type = _expand_event_type(_EVENT_TYPE_POST, weights_post.size(0), device, weights.dtype)
         extras_list.append(torch.cat([weights_post, event_type], dim=1))
 
         pre_indices_list.append(pre_idx)
@@ -92,13 +97,20 @@ def _gather_events(
         empty_index = torch.empty((0,), device=device, dtype=torch.long)
         return empty_state, empty_extras, empty_index, empty_index, empty_index
 
-    return (
-        torch.cat(states_list, dim=0),
-        torch.cat(extras_list, dim=0),
-        torch.cat(pre_indices_list, dim=0),
-        torch.cat(post_indices_list, dim=0),
-        torch.cat(batch_indices_list, dim=0),
-    )
+    if len(states_list) == 1:
+        states_cat = states_list[0]
+        extras_cat = extras_list[0]
+        pre_cat = pre_indices_list[0]
+        post_cat = post_indices_list[0]
+        batch_cat = batch_indices_list[0]
+    else:
+        states_cat = torch.cat(states_list, dim=0)
+        extras_cat = torch.cat(extras_list, dim=0)
+        pre_cat = torch.cat(pre_indices_list, dim=0)
+        post_cat = torch.cat(post_indices_list, dim=0)
+        batch_cat = torch.cat(batch_indices_list, dim=0)
+
+    return states_cat, extras_cat, pre_cat, post_cat, batch_cat
 
 
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> None:
@@ -194,7 +206,7 @@ def run_semi(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             batch_acc_tensor = (preds == labels).float().mean()
-            epoch_acc.append(batch_acc_tensor.detach().cpu())
+            epoch_acc.append(batch_acc_tensor.detach())
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
@@ -247,11 +259,11 @@ def run_semi(args, logger):
                         _scatter_updates(delta[out_mask], pre_idx[out_mask], post_idx[out_mask], network.w_hidden_output)
                         network.w_hidden_output.clamp_(args.exc_clip_min, args.exc_clip_max)
 
-                delta_t_values.append(_extract_delta_t(states).detach().cpu())
-                delta_d_values.append(actions.detach().cpu())
+                delta_t_values.append(_extract_delta_t(states).detach())
+                delta_d_values.append(actions.detach())
 
-            epoch_margin.append(r_margin.detach().cpu())
-            epoch_reward.append(r_total.detach().cpu())
+            epoch_margin.append(r_margin.detach())
+            epoch_reward.append(r_total.detach())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -264,8 +276,12 @@ def run_semi(args, logger):
                 )
 
         mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
-        margin_tensor = torch.cat([m.reshape(-1) for m in epoch_margin]) if epoch_margin else torch.empty(0)
-        reward_tensor = torch.cat([r.reshape(-1) for r in epoch_reward]) if epoch_reward else torch.empty(0)
+        margin_tensor = (
+            torch.cat([m.reshape(-1) for m in epoch_margin]) if epoch_margin else torch.empty(0, device=device)
+        )
+        reward_tensor = (
+            torch.cat([r.reshape(-1) for r in epoch_reward]) if epoch_reward else torch.empty(0, device=device)
+        )
         mean_margin = margin_tensor.mean().item() if margin_tensor.numel() > 0 else 0.0
         mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
 
