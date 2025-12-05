@@ -25,7 +25,8 @@ def _ensure_metrics_file(path: str, header: str) -> None:
 
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     delta_matrix = torch.zeros_like(weights)
-    delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
+    flat_index = pre_idx * weights.size(1) + post_idx
+    delta_matrix.view(-1).scatter_add_(0, flat_index, delta)
     return delta_matrix
 
 
@@ -184,7 +185,16 @@ def run_grad(args, logger):
                     return F.cross_entropy(logits, label.unsqueeze(0))
 
                 grad_fn = grad(loss_fn)
-                per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
+                chunk_size = getattr(args, "grad_chunk_size", 0)
+                if chunk_size and chunk_size > 0:
+                    grad_chunks = []
+                    for start in range(0, input_spikes.size(0), chunk_size):
+                        end = start + chunk_size
+                        grads_chunk = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes[start:end], labels[start:end])
+                        grad_chunks.append(grads_chunk)
+                    per_sample_grads = tuple(torch.cat([gc[i] for gc in grad_chunks], dim=0) for i in range(len(teacher_params)))
+                else:
+                    per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
                 teacher_deltas = [-args.alpha_align * g for g in per_sample_grads]
 
                 squared_error_sum = torch.zeros(batch_size, device=device)

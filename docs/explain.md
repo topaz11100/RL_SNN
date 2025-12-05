@@ -33,10 +33,10 @@
   - **Theory 연계**: 텍스트 기반 로그 저장 요구를 충족.
 
 ### utils/event_utils.py
-- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
-  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 **희소 인덱스(`nonzero`) 기반 advanced indexing**으로 수집한다. `unfold`를 사용해 `(batch, neurons, T, L)` 조각을 생성하던 방식 대신, 패딩된 텐서에서 필요한 위치만 모아 GPU 메모리 사용량을 크게 줄였다. 동일한 스파이크 텐서가 연속된 레이어의 pre/post로 재사용될 때는 `padded_pre`/`padded_post`를 전달해 중복 `F.pad`를 건너뛰어 GPU 할당을 줄인다.
-  - **출력**: `(states, extras, pre_idx, post_idx, batch_idx)` 형태로, `extras`에는 가중치(+선택적 레이어 정규화 스칼라)+이벤트 타입 원핫이 포함된다.
-  - **Theory 연계/최적화**: 스파이크 희소성을 활용해 OOM 위험을 없애고 GPU 친화적인 히스토리 수집을 제공하며, 중복 패딩 방지로 레이어 반복 시 메모리 복사를 줄였다.
+- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None, max_pairs: int = 131072) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
+  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 희소 인덱싱으로 수집하되, `max_pairs` 단위로 pre/post 조합을 잘라 처리한다. `repeat_interleave`로 모든 조합을 한 번에 생성하지 않고, `nonzero` 결과를 블록 단위로 펼쳐 필요한 윈도우만 `_select_windows`로 가져오므로 `N_pre × N_post × N_spikes` 임시 텐서가 생성되지 않는다.
+  - **출력**: `(states, extras, pre_idx, post_idx, batch_idx)`이며 `extras`는 가중치(+선택적 레이어 정규화)와 이벤트 타입 원핫을 포함한다. 동일한 스파이크 텐서를 여러 레이어에서 재사용할 때 `padded_pre/post`를 전달하면 패딩 비용을 공유한다.
+  - **Theory 연계/최적화**: 스파이크 희소성을 활용하면서도 블록 처리로 GPU 메모리 피크를 제어해 대규모 fully-connected 층에서도 `Theory.md` 2.9.3의 이미지 단위 미니배치 규칙을 안전하게 만족시킨다.
 
 ## data 모듈
 ### data/mnist.py
@@ -104,7 +104,7 @@
   - **Theory 연계**: `Theory.md` 6.4절의 gradient mimicry 실험 네트워크.
 - `forward(input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-- **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 스파이크를 **리스트에 수집한 뒤 루프 종료 후 `torch.stack`**으로 한 번에 텐서화해 `vmap` 등 함수형 변환과 호환되도록 한다. 타임스텝 내부에서 `torch.cat`을 반복하지 않아 O(T) 복잡도를 유지하며 GPU 메모리 복사를 최소화한다. 은닉층이 없을 때는 빈 리스트와 출력 스파이크만 반환한다. 각 타임스텝은 새로운 막전위/스파이크 텐서를 생성해 상태를 갱신하므로 in-place 연산 없이 함수형 추적이 가능하다.
+  - **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 `(batch, neurons, T)` 크기의 버퍼를 **사전 할당**하고 인덱싱으로 채운다. 파이썬 리스트 append와 루프 종료 후 `stack`을 제거해 GPU 동기화를 줄였으며, `T=0`이면 즉시 빈 텐서를 반환한다.
   - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`로 각 층/출력의 스파이크열과 평균 발화율.
   - **Theory 연계**: Teacher gradient 계산과 에이전트 시뮬레이션을 위한 differentiable forward.
 
@@ -138,6 +138,10 @@
 - `EpisodeBuffer.__init__()`
   - **역할**: 스파이크 히스토리, 추가 특징, 행동, 로그확률, 가치, 보상 리스트 초기화.
   - **Theory 연계**: 에피소드 단위 rollout 저장.
+- `EventBatchBuffer`
+  - **역할**: 이벤트 단위 on-policy 배치를 GPU 상 연속 메모리에 저장한다. 초기 용량을 한 번 확보한 뒤 길이가 초과되면 두 배 확장해 리스트 기반 append 대비 메모리 파편화와 재할당을 줄인다.
+  - **동작**: `add`는 detch된 `(states, extras, pre/post/batch 인덱스, episode/connection id)`를 미리 할당된 구간에 슬라이스로 기입하고 길이만 증가시킨다. `flatten`은 현재 길이까지만 view 형태로 반환해 추가 복사 없이 PPO 미니배치에 공급한다.
+  - **Theory 연계/최적화**: `Theory.md` 2.9.3/2.9.4의 이미지 미니배치 기반 이벤트 업데이트를 유지하면서 GPU 메모리 연속성을 확보해 Actor 재연산 시 파편화를 방지한다.
 - `append(state: torch.Tensor, extra_features: torch.Tensor, action: torch.Tensor, log_prob: torch.Tensor, value: torch.Tensor) -> None`
   - **역할**: 이벤트별 로컬 상태와 추가 특징을 포함해 detach한 기록을 버퍼에 추가.
   - **Theory 연계**: MC PPO에서 θ_old 정보를 유지하고 상태 z_i(t)에 요구되는 보조 feature를 함께 보존.
@@ -205,8 +209,8 @@
   - **역할**: 발화율 기반 예측 정확도와 마진 기반 보상 근사치를 평가.
   - `run_grad(args, logger)`
     - **역할**: Poisson 인코딩된 MNIST를 입력으로 에이전트/Teacher 네트워크를 모두 시뮬레이션하고, 입력→은닉/은닉→출력 이벤트별 로컬 상태(히스토리, 현재 가중치, 정규화된 레이어 인덱스, 이벤트 타입)를 통해 Δd를 산출해 각 시냅스에 개별적으로 적용한다. 에피소드 동안 누적된 에이전트 업데이트 `Δw_agent`와 Teacher 업데이트 `Δw_teacher` 간 제곱 오차 평균을 보상으로 사용하며, 이미지 미니배치 단위로 PPO Actor–Critic을 학습한다.
-    - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. PPO 업데이트는 `ppo_batch_size`와 이벤트 수를 비교해 미니배치 단위로 진행해 `Theory.md` 2.9.3/2.9.4의 배치 요구를 충족한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다. 이벤트 수집은 `gather_events`의 희소 윈도우 선택과 레이어 정규화 스칼라(`l_norm`)를 extras에 포함하는 방식으로 통일하며, 동일 스파이크열을 pre/post로 재사용할 때는 패딩 캐시를 공유해 중복 `F.pad`를 줄인다.
-    - **최적화**: vmap 호환을 위해 forward에서 in-place 상태 갱신을 제거하고, 보상·정렬 통계 및 델타 히스토리를 GPU에 유지한 채 에포크 종료 후에만 CPU로 이동해 로그/시각화를 수행한다.
+    - **세부 구현**: 에포크 진입 시 `s_scen = 1.0`을 정의하고, 모든 `_scatter_updates` 호출이 `args.local_lr * s_scen * action`을 사용하도록 해 로컬 학습률 수식 `Δw_i(t) = η_w * s_scen * Δd_i(t)`을 코드에 명시한다. PPO 업데이트는 `ppo_batch_size`와 이벤트 수를 비교해 미니배치 단위로 진행해 `Theory.md` 2.9.3/2.9.4의 배치 요구를 충족한다. 이후 레이어별 델타를 가중치에 적용하고 지정된 범위로 클리핑한 뒤 Teacher 대비 정렬 보상을 계산한다. 이벤트 수집은 `gather_events`의 블록 기반 희소 윈도우 선택과 레이어 정규화 스칼라(`l_norm`)를 extras에 포함하는 방식으로 통일하며, 동일 스파이크열을 pre/post로 재사용할 때는 패딩 캐시를 공유해 중복 `F.pad`를 줄인다.
+    - **최적화**: Teacher per-sample gradient는 `grad_chunk_size`(설정 시) 단위로 `vmap`을 여러 번 호출해 GPU 메모리 피크를 제어한다. 네트워크 forward는 사전 할당된 출력 버퍼를 사용해 동기화를 줄이고, 보상·정렬 통계 및 델타 히스토리는 GPU에 유지한 채 에포크 종료 후에만 CPU로 이동해 로그/시각화를 수행한다.
     - **Theory 연계**: 시나리오 3의 gradient mimicry 학습 루프.
 
 ## main.py
