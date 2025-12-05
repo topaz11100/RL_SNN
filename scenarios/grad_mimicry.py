@@ -42,71 +42,44 @@ def _gather_events(
     pre_windows = pad_pre.unfold(2, L, 1)
     post_windows = pad_post.unfold(2, L, 1)
 
-    states_list = []
-    extras_list = []
-    pre_indices_list = []
-    post_indices_list = []
-    batch_indices_list = []
+    def _build_events(mask: torch.Tensor, is_pre: bool):
+        b_idx, main_idx, t_idx = torch.where(mask)
+        repeat_count = n_post if is_pre else n_pre
 
-    # Optimized: build events only for real spikes to avoid large expanded tensors.
-    pre_events = pre_spikes.nonzero(as_tuple=False)
-    if pre_events.numel() > 0:
-        batch_pre = pre_events[:, 0].repeat_interleave(n_post)
-        pre_idx = pre_events[:, 1].repeat_interleave(n_post)
-        time_idx = pre_events[:, 2].repeat_interleave(n_post)
-        post_idx = torch.arange(n_post, device=device).repeat(pre_events.size(0))
+        batch_rep = b_idx.repeat_interleave(repeat_count)
+        main_rep = main_idx.repeat_interleave(repeat_count)
+        time_rep = t_idx.repeat_interleave(repeat_count)
 
-        pre_hist = pre_windows[batch_pre, pre_idx, time_idx]
-        post_hist = post_windows[batch_pre, post_idx, time_idx]
-        states_list.append(torch.stack([pre_hist, post_hist], dim=1))
+        other_idx = torch.arange(n_post if is_pre else n_pre, device=device)
+        other_rep = other_idx.repeat(b_idx.numel())
 
-        weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
-        l_norm_tensor_pre = torch.full_like(weights_pre, l_norm)
-        event_type = _expand_event_type(_EVENT_TYPE_PRE, weights_pre.size(0), device, weights.dtype)
-        extras_list.append(torch.cat([weights_pre, l_norm_tensor_pre, event_type], dim=1))
+        pre_ids = main_rep if is_pre else other_rep
+        post_ids = other_rep if is_pre else main_rep
 
-        pre_indices_list.append(pre_idx)
-        post_indices_list.append(post_idx)
-        batch_indices_list.append(batch_pre)
+        pre_hist = pre_windows[batch_rep, pre_ids, time_rep]
+        post_hist = post_windows[batch_rep, post_ids, time_rep]
+        states = torch.stack((pre_hist, post_hist), dim=1)
 
-    post_events = post_spikes.nonzero(as_tuple=False)
-    if post_events.numel() > 0:
-        batch_post = post_events[:, 0].repeat_interleave(n_pre)
-        post_idx = post_events[:, 1].repeat_interleave(n_pre)
-        time_idx = post_events[:, 2].repeat_interleave(n_pre)
-        pre_idx = torch.arange(n_pre, device=device).repeat(post_events.size(0))
+        selected_weights = weights[pre_ids, post_ids].unsqueeze(1)
+        l_norm_tensor = torch.full_like(selected_weights, l_norm)
+        event_type = _expand_event_type(
+            _EVENT_TYPE_PRE if is_pre else _EVENT_TYPE_POST,
+            selected_weights.size(0),
+            device,
+            weights.dtype,
+        )
+        extras = torch.cat((selected_weights, l_norm_tensor, event_type), dim=1)
 
-        pre_hist = pre_windows[batch_post, pre_idx, time_idx]
-        post_hist = post_windows[batch_post, post_idx, time_idx]
-        states_list.append(torch.stack([pre_hist, post_hist], dim=1))
+        return states, extras, pre_ids, post_ids, batch_rep
 
-        weights_post = weights[pre_idx, post_idx].unsqueeze(1)
-        l_norm_tensor_post = torch.full_like(weights_post, l_norm)
-        event_type = _expand_event_type(_EVENT_TYPE_POST, weights_post.size(0), device, weights.dtype)
-        extras_list.append(torch.cat([weights_post, l_norm_tensor_post, event_type], dim=1))
+    states_pre, extras_pre, pre_idx_pre, post_idx_pre, batch_pre = _build_events(pre_spikes > 0, True)
+    states_post, extras_post, pre_idx_post, post_idx_post, batch_post = _build_events(post_spikes > 0, False)
 
-        pre_indices_list.append(pre_idx)
-        post_indices_list.append(post_idx)
-        batch_indices_list.append(batch_post)
-
-    if not states_list:
-        empty_state = torch.empty((0, 2, L), device=device, dtype=pre_spikes.dtype)
-        empty_extras = torch.empty((0, 4), device=device, dtype=weights.dtype)
-        empty_index = torch.empty((0,), device=device, dtype=torch.long)
-        return empty_state, empty_extras, empty_index, empty_index, empty_index
-
-    if len(states_list) == 1:
-        states_cat = states_list[0]
-        extras_cat = extras_list[0]
-        pre_cat = pre_indices_list[0]
-        post_cat = post_indices_list[0]
-        batch_cat = batch_indices_list[0]
-    else:
-        states_cat = torch.cat(states_list, dim=0)
-        extras_cat = torch.cat(extras_list, dim=0)
-        pre_cat = torch.cat(pre_indices_list, dim=0)
-        post_cat = torch.cat(post_indices_list, dim=0)
-        batch_cat = torch.cat(batch_indices_list, dim=0)
+    states_cat = torch.cat((states_pre, states_post), dim=0)
+    extras_cat = torch.cat((extras_pre, extras_post), dim=0)
+    pre_cat = torch.cat((pre_idx_pre, pre_idx_post), dim=0)
+    post_cat = torch.cat((post_idx_pre, post_idx_post), dim=0)
+    batch_cat = torch.cat((batch_pre, batch_post), dim=0)
 
     return states_cat, extras_cat, pre_cat, post_cat, batch_cat
 
@@ -269,6 +242,7 @@ def run_grad(args, logger):
                 returns = rewards.detach()[batch_idx_events]
                 advantages = returns - values_old.detach()
 
+                full_event_batch = states.size(0)
                 ppo_update_events(
                     actor,
                     critic,
@@ -281,7 +255,7 @@ def run_grad(args, logger):
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, states.size(0)),
+                    batch_size=full_event_batch,
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
                 )
