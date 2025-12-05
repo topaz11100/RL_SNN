@@ -79,7 +79,7 @@ $$
 \tau_{m} \frac{dv(t)}{dt} = -v(t) + R I_{\text{syn}}(t)
 $$
 
-막전위가 임계값 $v_{\theta}$ 를 넘으면 스파이크를 내고 $v$ 는 reset 된다(soft/hard reset 등 세부 설정은 하이퍼파라미터로 제어).
+막전위가 임계값 $v_{\theta}$ 를 넘으면 스파이크를 내고 $v$ 는 reset 된다 (구현 편의, 간단한 모델을 위해 hard reset 사용)
 
 구현상의 주요 가정은 다음과 같다.
 
