@@ -164,7 +164,10 @@ def run_grad(args, logger):
 
                 num_layers = len(network.w_layers)
                 batch_size = input_spikes.size(0)
-                agent_deltas = [torch.zeros((batch_size, *w.shape), device=device) for w in network.w_layers]
+                agent_deltas = [
+                    torch.zeros((batch_size, *w.shape), device=device, dtype=w.dtype)
+                    for w in network.w_layers
+                ]
 
                 for li in range(num_layers):
                     layer_mask = connection_ids == li
@@ -196,11 +199,12 @@ def run_grad(args, logger):
                     per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
                 teacher_deltas = [-args.alpha_align * g for g in per_sample_grads]
 
-                squared_error_sum = torch.zeros(batch_size, device=device)
-                active_count = torch.zeros(batch_size, device=device)
+                acc_dtype = agent_deltas[0].dtype
+                squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
+                active_count = torch.zeros(batch_size, device=device, dtype=acc_dtype)
 
                 for li in range(num_layers):
-                    mask = agent_deltas[li] != 0
+                    mask = agent_deltas[li].ne(0).to(acc_dtype)
                     diff = agent_deltas[li] - teacher_deltas[li]
                     squared_error_sum = squared_error_sum + (diff.pow(2) * mask).sum(dim=(1, 2))
                     active_count = active_count + mask.sum(dim=(1, 2))
