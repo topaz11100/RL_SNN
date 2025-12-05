@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from rl.buffers import EventBatchBuffer
+
 _EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
 _EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
 
@@ -94,7 +96,7 @@ def _build_states_and_extras(
     pre_hist = _select_windows(padded_pre, batches, pre_idx, times, window)
     post_hist = _select_windows(padded_post, batches, post_idx, times, window)
 
-    states = torch.stack([pre_hist, post_hist], dim=1)
+    states = torch.stack([pre_hist, post_hist], dim=1).to(torch.bool)
     weights_sel = weights[pre_idx, post_idx].unsqueeze(1)
     extras_parts = [weights_sel]
     if l_norm is not None:
@@ -102,25 +104,26 @@ def _build_states_and_extras(
     extras_parts.append(_expand_event_type(event_type, weights_sel.size(0), device, weights.dtype))
     extras = torch.cat(extras_parts, dim=1)
     return states, extras
-
-
 def gather_events(
     pre_spikes: torch.Tensor,
     post_spikes: torch.Tensor,
     weights: torch.Tensor,
     window: int,
+    buffer: EventBatchBuffer,
+    connection_id: int,
     *,
     l_norm: float | None = None,
     valid_mask: torch.Tensor | None = None,
     padded_pre: torch.Tensor | None = None,
     padded_post: torch.Tensor | None = None,
     max_pairs: int = 131072,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Sparse 이벤트 수집을 위한 GPU 친화적 페어 생성.
+) -> None:
+    """Sparse 이벤트를 직접 ``EventBatchBuffer``에 기록한다.
 
-    * `max_pairs` 로 pre/post 조합 수를 제한해 거대 임시 텐서 생성 없이
-      블록 단위로 처리한다.
-    * `padded_pre/post`를 재사용하여 pad 비용을 줄인다.
+    Triple-copy가 발생하던 리스트 → cat → add 경로를 제거하고, JIT friendly한
+    연속 버퍼에 즉시 기록하여 GPU 메모리 대역폭을 절약한다. `weights`는
+    호출 시점의 값을 detach하여 Actor가 시뮬레이션 당시 가중치에 대한
+    extras를 받도록 명시적으로 보장한다.
     """
 
     device = pre_spikes.device
@@ -129,12 +132,7 @@ def gather_events(
 
     padded_pre = padded_pre if padded_pre is not None else F.pad(pre_spikes, (window - 1, 0))
     padded_post = padded_post if padded_post is not None else F.pad(post_spikes, (window - 1, 0))
-
-    states_list: list[torch.Tensor] = []
-    extras_list: list[torch.Tensor] = []
-    pre_indices_list: list[torch.Tensor] = []
-    post_indices_list: list[torch.Tensor] = []
-    batch_indices_list: list[torch.Tensor] = []
+    weight_snapshot = weights.detach()
 
     pre_events = pre_spikes.nonzero(as_tuple=False)
     batch_time_pre, primary_pre, other_pre = _pairwise_indices(
@@ -145,7 +143,7 @@ def gather_events(
             padded_pre,
             padded_post,
             window,
-            weights,
+            weight_snapshot,
             l_norm=l_norm,
             event_type=_EVENT_TYPE_PRE,
             batch_and_time=bt,
@@ -153,11 +151,23 @@ def gather_events(
             post_idx=post_idx,
             device=device,
         )
-        states_list.append(states)
-        extras_list.append(extras)
-        pre_indices_list.append(pre_idx)
-        post_indices_list.append(post_idx)
-        batch_indices_list.append(bt[:, 0])
+        states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
+            states.size(0),
+            state_shape=states.shape,
+            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
+            device=device,
+            state_dtype=states.dtype,
+            extras_dtype=extras.dtype if extras.numel() > 0 else weight_snapshot.dtype,
+        )
+        if states_view.numel() == 0:
+            continue
+        states_view.copy_(states)
+        if extras_view.numel() > 0:
+            extras_view.copy_(extras)
+        conn_view.fill_(connection_id)
+        pre_view.copy_(pre_idx)
+        post_view.copy_(post_idx)
+        batch_view.copy_(bt[:, 0])
 
     post_events = post_spikes.nonzero(as_tuple=False)
     batch_time_post, primary_post, other_post = _pairwise_indices(
@@ -168,7 +178,7 @@ def gather_events(
             padded_pre,
             padded_post,
             window,
-            weights,
+            weight_snapshot,
             l_norm=l_norm,
             event_type=_EVENT_TYPE_POST,
             batch_and_time=bt,
@@ -176,22 +186,20 @@ def gather_events(
             post_idx=post_idx,
             device=device,
         )
-        states_list.append(states)
-        extras_list.append(extras)
-        pre_indices_list.append(pre_idx)
-        post_indices_list.append(post_idx)
-        batch_indices_list.append(bt[:, 0])
-
-    if not states_list:
-        empty_state = torch.empty((0, 2, window), device=device, dtype=pre_spikes.dtype)
-        empty_extras = torch.empty((0, (3 if l_norm is None else 4)), device=device, dtype=weights.dtype)
-        empty_index = torch.empty((0,), device=device, dtype=torch.long)
-        return empty_state, empty_extras, empty_index, empty_index, empty_index
-
-    states_cat = torch.cat(states_list, dim=0) if len(states_list) > 1 else states_list[0]
-    extras_cat = torch.cat(extras_list, dim=0) if len(extras_list) > 1 else extras_list[0]
-    pre_cat = torch.cat(pre_indices_list, dim=0) if len(pre_indices_list) > 1 else pre_indices_list[0]
-    post_cat = torch.cat(post_indices_list, dim=0) if len(post_indices_list) > 1 else post_indices_list[0]
-    batch_cat = torch.cat(batch_indices_list, dim=0) if len(batch_indices_list) > 1 else batch_indices_list[0]
-
-    return states_cat, extras_cat, pre_cat, post_cat, batch_cat
+        states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
+            states.size(0),
+            state_shape=states.shape,
+            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
+            device=device,
+            state_dtype=states.dtype,
+            extras_dtype=extras.dtype if extras.numel() > 0 else weight_snapshot.dtype,
+        )
+        if states_view.numel() == 0:
+            continue
+        states_view.copy_(states)
+        if extras_view.numel() > 0:
+            extras_view.copy_(extras)
+        conn_view.fill_(connection_id)
+        pre_view.copy_(pre_idx)
+        post_view.copy_(post_idx)
+        batch_view.copy_(bt[:, 0])

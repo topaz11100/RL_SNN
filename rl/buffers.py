@@ -1,4 +1,5 @@
 from typing import List, Tuple
+
 import torch
 
 
@@ -75,7 +76,15 @@ class EventBatchBuffer:
         self.pre_indices: torch.Tensor | None = None
         self.post_indices: torch.Tensor | None = None
 
-    def _allocate(self, count: int, state_shape: torch.Size, extras_dim: int, device, dtype, extras_dtype) -> None:
+    def _allocate(
+        self,
+        count: int,
+        state_shape: torch.Size,
+        extras_dim: int,
+        device,
+        dtype,
+        extras_dtype,
+    ) -> None:
         self.capacity = max(self.initial_capacity, count)
         self.states = torch.empty((self.capacity, *state_shape[1:]), device=device, dtype=dtype)
         self.extras = torch.empty((self.capacity, extras_dim), device=device, dtype=extras_dtype)
@@ -91,31 +100,62 @@ class EventBatchBuffer:
         if needed <= self.capacity:
             return
         new_capacity = max(needed, self.capacity * 2)
-        self.states = torch.cat(
-            [self.states, torch.empty((new_capacity - self.capacity, *self.states.shape[1:]), device=self.states.device, dtype=self.states.dtype)],
-            dim=0,
-        )
-        self.extras = torch.cat(
-            [self.extras, torch.empty((new_capacity - self.capacity, self.extras.size(1)), device=self.extras.device, dtype=self.extras.dtype)],
-            dim=0,
-        )
-        self.batch_indices = torch.cat(
-            [self.batch_indices, torch.empty((new_capacity - self.capacity,), device=self.batch_indices.device, dtype=self.batch_indices.dtype)],
-            dim=0,
-        )
-        self.connection_ids = torch.cat(
-            [self.connection_ids, torch.empty((new_capacity - self.capacity,), device=self.connection_ids.device, dtype=self.connection_ids.dtype)],
-            dim=0,
-        )
-        self.pre_indices = torch.cat(
-            [self.pre_indices, torch.empty((new_capacity - self.capacity,), device=self.pre_indices.device, dtype=self.pre_indices.dtype)],
-            dim=0,
-        )
-        self.post_indices = torch.cat(
-            [self.post_indices, torch.empty((new_capacity - self.capacity,), device=self.post_indices.device, dtype=self.post_indices.dtype)],
-            dim=0,
-        )
+
+        def _grow(storage: torch.Tensor, shape_tail: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+            new_tensor = torch.empty((new_capacity, *shape_tail), device=storage.device, dtype=dtype)
+            new_tensor[: self.length].copy_(storage[: self.length])
+            return new_tensor
+
+        self.states = _grow(self.states, tuple(self.states.shape[1:]), self.states.dtype)
+        self.extras = _grow(self.extras, (self.extras.size(1),), self.extras.dtype)
+        self.batch_indices = _grow(self.batch_indices, (), self.batch_indices.dtype)
+        self.connection_ids = _grow(self.connection_ids, (), self.connection_ids.dtype)
+        self.pre_indices = _grow(self.pre_indices, (), self.pre_indices.dtype)
+        self.post_indices = _grow(self.post_indices, (), self.post_indices.dtype)
         self.capacity = new_capacity
+
+    def reserve(
+        self,
+        count: int,
+        *,
+        state_shape: torch.Size,
+        extras_dim: int,
+        device,
+        state_dtype: torch.dtype,
+        extras_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Ensure capacity for ``count`` events and return writable slices.
+
+        The buffer length is advanced eagerly to avoid re-checking capacity for
+        every sub-block within a single gather call.
+        """
+
+        if count == 0:
+            empty = torch.empty((0,), device=device, dtype=torch.long)
+            empty_states = torch.empty((0, *state_shape[1:]), device=device, dtype=state_dtype)
+            empty_extras = torch.empty((0, extras_dim), device=device, dtype=extras_dtype)
+            return empty_states, empty_extras, empty, empty, empty, empty
+
+        if self.states is None:
+            self._allocate(count, state_shape, extras_dim, device, state_dtype, extras_dtype)
+        else:
+            if self.states.shape[1:] != state_shape[1:]:
+                raise ValueError("State shape mismatch for EventBatchBuffer")
+            if self.extras.size(1) != extras_dim:
+                raise ValueError("Extras dimension mismatch for EventBatchBuffer")
+            self._ensure_capacity(count)
+
+        start = self.length
+        end = start + count
+        self.length = end
+
+        states_view = self.states[start:end]
+        extras_view = self.extras[start:end]
+        batch_view = self.batch_indices[start:end]
+        conn_view = self.connection_ids[start:end]
+        pre_view = self.pre_indices[start:end]
+        post_view = self.post_indices[start:end]
+        return states_view, extras_view, conn_view, pre_view, post_view, batch_view
 
     def add(
         self,
@@ -128,32 +168,30 @@ class EventBatchBuffer:
     ) -> None:
         if states.numel() == 0:
             return
-        count = states.size(0)
-        device = states.device
 
-        if self.states is None:
-            extras_dim = extras.size(1) if extras.numel() > 0 else 0
-            self._allocate(count, states.shape, extras_dim, device, states.dtype, extras.dtype if extras_dim > 0 else states.dtype)
-        else:
-            self._ensure_capacity(count)
+        states_view, extras_view, conn_view, pre_view, post_view, batch_view = self.reserve(
+            states.size(0),
+            state_shape=states.shape,
+            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
+            device=states.device,
+            state_dtype=states.dtype,
+            extras_dtype=extras.dtype if extras.numel() > 0 else states.dtype,
+        )
 
-        end = self.length + count
-        self.states[self.length : end] = states.detach()
-        if extras.numel() > 0:
-            self.extras[self.length : end] = extras.detach()
-        self.connection_ids[self.length : end] = connection_id
-        self.pre_indices[self.length : end] = pre_idx
-        self.post_indices[self.length : end] = post_idx
-        # batch_idx must be local to the current mini-batch (0..batch_size-1) to keep
-        # reward/advantage lookups aligned during PPO updates.
-        self.batch_indices[self.length : end] = batch_idx.to(device=device, dtype=torch.long)
-        self.length = end
+        states_view.copy_(states.detach())
+        if extras_view.numel() > 0:
+            extras_view.copy_(extras.detach())
+        conn_view.fill_(connection_id)
+        pre_view.copy_(pre_idx)
+        post_view.copy_(post_idx)
+        batch_view.copy_(batch_idx.to(device=states.device, dtype=torch.long))
 
     def flatten(self, allow_empty: bool = False) -> Tuple[torch.Tensor, ...]:
         if self.states is None or self.length == 0:
             if allow_empty:
-                empty = torch.empty(0)
-                return empty, empty, empty, empty, empty, empty
+                empty_states = torch.empty(0, device="cpu")
+                empty_long = torch.empty(0, dtype=torch.long)
+                return empty_states, empty_states, empty_long, empty_long, empty_long, empty_long
             raise ValueError("No events were added to the buffer")
 
         states = self.states[: self.length]

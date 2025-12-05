@@ -3,7 +3,88 @@ from typing import List, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from snn.lif import LIFCell, LIFParams
+from snn.lif import LIFParams, lif_dynamics_script
+
+
+@torch.jit.script
+def _grad_mimicry_forward_script(
+    input_spikes: Tensor,
+    w_layers: Tuple[Tensor, ...],
+    hidden_sizes: List[int],
+    hidden_params: LIFParams,
+    output_params: LIFParams,
+    surrogate_slope: float,
+) -> Tuple[List[Tensor], Tensor, Tensor]:
+    batch_size, _, T = input_spikes.shape
+    device = input_spikes.device
+    dtype = input_spikes.dtype
+
+    n_hidden_layers = len(hidden_sizes)
+
+    v_states: Tuple[Tensor, ...] = tuple(
+        torch.full((batch_size, h), hidden_params.v_rest, device=device, dtype=dtype) for h in hidden_sizes
+    )
+    s_prev: Tuple[Tensor, ...] = tuple(torch.zeros((batch_size, h), device=device, dtype=dtype) for h in hidden_sizes)
+    v_output = torch.full((batch_size, w_layers[-1].size(1)), output_params.v_rest, device=device, dtype=dtype)
+
+    if T == 0:
+        empty_hidden = [torch.empty((batch_size, h, 0), device=device, dtype=dtype) for h in hidden_sizes]
+        empty_output = torch.empty((batch_size, w_layers[-1].size(1), 0), device=device, dtype=dtype)
+        firing_rates = torch.zeros((batch_size, w_layers[-1].size(1)), device=device, dtype=dtype)
+        return empty_hidden, empty_output, firing_rates
+
+    hidden_spikes_tensor: Tuple[Tensor, ...] = tuple(
+        torch.empty((batch_size, h, T), device=device, dtype=dtype) for h in hidden_sizes
+    )
+    output_spikes = torch.empty((batch_size, w_layers[-1].size(1), T), device=device, dtype=dtype)
+
+    if n_hidden_layers == 0:
+        for t in range(T):
+            x_t = input_spikes[:, :, t]
+            current_out = torch.matmul(x_t, torch.relu(w_layers[0]))
+            v_output, s_output = lif_dynamics_script(
+                v_output, current_out, output_params, True, surrogate_slope
+            )
+            output_spikes[:, :, t] = s_output
+
+        firing_rates = output_spikes.mean(dim=2)
+        return [], output_spikes, firing_rates
+
+    for t in range(T):
+        x_t = input_spikes[:, :, t]
+
+        current_first = torch.matmul(x_t, torch.relu(w_layers[0]))
+        v_first_next, s_first = lif_dynamics_script(
+            v_states[0], current_first, hidden_params, True, surrogate_slope
+        )
+
+        new_v_states = (v_first_next,)
+        new_spikes = (s_first,)
+
+        for li in range(1, n_hidden_layers):
+            current_hidden = torch.matmul(s_prev[li - 1], torch.relu(w_layers[li]))
+            v_next, s_next = lif_dynamics_script(
+                v_states[li], current_hidden, hidden_params, True, surrogate_slope
+            )
+            new_v_states = new_v_states + (v_next,)
+            new_spikes = new_spikes + (s_next,)
+
+        prev_spikes_for_output = s_prev[-1]
+        current_out = torch.matmul(prev_spikes_for_output, torch.relu(w_layers[-1]))
+        v_output, s_output = lif_dynamics_script(
+            v_output, current_out, output_params, True, surrogate_slope
+        )
+
+        for li, spike in enumerate(new_spikes):
+            hidden_spikes_tensor[li][:, :, t] = spike
+        output_spikes[:, :, t] = s_output
+
+        v_states = new_v_states
+        s_prev = new_spikes
+
+    hidden_spikes = [tensor for tensor in hidden_spikes_tensor]
+    firing_rates = output_spikes.mean(dim=2)
+    return hidden_spikes, output_spikes, firing_rates
 
 
 class GradMimicryNetwork(nn.Module):
@@ -32,10 +113,6 @@ class GradMimicryNetwork(nn.Module):
         ]
         self.w_layers = nn.ParameterList(weights)
 
-        # Surrogate LIF dynamics shared across layers (Theory 2.2)
-        self.hidden_cell = LIFCell(self.hidden_params, surrogate=True, slope=self.surrogate_slope)
-        self.output_cell = LIFCell(self.output_params, surrogate=True, slope=self.surrogate_slope)
-
     @property
     def w_input_hidden(self) -> nn.Parameter:
         return self.w_layers[0]
@@ -47,70 +124,14 @@ class GradMimicryNetwork(nn.Module):
     def forward(self, input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]:
         if input_spikes.dim() != 3 or input_spikes.shape[1] != self.n_input:
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
-
-        batch_size, _, T = input_spikes.shape
-        device = input_spikes.device
-        dtype = input_spikes.dtype
-
-        n_hidden_layers = len(self.hidden_sizes)
-
-        v_states: Tuple[Tensor, ...] = tuple(
-            torch.full((batch_size, h), self.hidden_params.v_rest, device=device, dtype=dtype)
-            for h in self.hidden_sizes
+        return _grad_mimicry_forward_script(
+            input_spikes,
+            tuple(self.w_layers),
+            self.hidden_sizes,
+            self.hidden_params,
+            self.output_params,
+            self.surrogate_slope,
         )
-        s_prev: Tuple[Tensor, ...] = tuple(torch.zeros_like(v) for v in v_states)
-        v_output = torch.full((batch_size, self.n_output), self.output_params.v_rest, device=device, dtype=dtype)
-
-        if T == 0:
-            empty_hidden = [torch.empty((batch_size, h, 0), device=device, dtype=dtype) for h in self.hidden_sizes]
-            empty_output = torch.empty((batch_size, self.n_output, 0), device=device, dtype=dtype)
-            firing_rates = torch.zeros((batch_size, self.n_output), device=device, dtype=dtype)
-            return empty_hidden, empty_output, firing_rates
-
-        hidden_spikes_tensor: Tuple[Tensor, ...] = tuple(
-            torch.empty((batch_size, h, T), device=device, dtype=dtype) for h in self.hidden_sizes
-        )
-        output_spikes = torch.empty((batch_size, self.n_output, T), device=device, dtype=dtype)
-
-        if n_hidden_layers == 0:
-            for t in range(T):
-                x_t = input_spikes[:, :, t]
-                current_out = torch.matmul(x_t, torch.relu(self.w_layers[0]))
-                v_output, s_output = self.output_cell(v_output, current_out)
-                output_spikes[:, :, t] = s_output
-
-            firing_rates = output_spikes.mean(dim=2)
-            return [], output_spikes, firing_rates
-
-        for t in range(T):
-            x_t = input_spikes[:, :, t]
-
-            current_first = torch.matmul(x_t, torch.relu(self.w_layers[0]))
-            v_first_next, s_first = self.hidden_cell(v_states[0], current_first)
-
-            new_v_states = (v_first_next,)
-            new_spikes = (s_first,)
-
-            for li in range(1, n_hidden_layers):
-                current_hidden = torch.matmul(s_prev[li - 1], torch.relu(self.w_layers[li]))
-                v_next, s_next = self.hidden_cell(v_states[li], current_hidden)
-                new_v_states = new_v_states + (v_next,)
-                new_spikes = new_spikes + (s_next,)
-
-            prev_spikes_for_output = s_prev[-1]
-            current_out = torch.matmul(prev_spikes_for_output, torch.relu(self.w_layers[-1]))
-            v_output, s_output = self.output_cell(v_output, current_out)
-
-            for li, spike in enumerate(new_spikes):
-                hidden_spikes_tensor[li][:, :, t] = spike
-            output_spikes[:, :, t] = s_output
-
-            v_states = new_v_states
-            s_prev = new_spikes
-
-        hidden_spikes = [tensor for tensor in hidden_spikes_tensor]
-        firing_rates = output_spikes.mean(dim=2)
-        return hidden_spikes, output_spikes, firing_rates
 
     @property
     def synapse_shapes(self) -> List[Tuple[int, int]]:

@@ -14,7 +14,7 @@ class _CNNFront(nn.Module):
     def forward(self, spike_history: torch.Tensor) -> torch.Tensor:
         if spike_history.dim() != 3:
             raise ValueError("spike_history must have shape (batch, 2, L)")
-        x = F.relu(self.conv1(spike_history))
+        x = F.relu(self.conv1(spike_history.float()))
         x = F.relu(self.conv2(x))
         return x.mean(dim=2)
 
