@@ -47,7 +47,10 @@ def _compute_reward_components(
 
 def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[float, float, float]:
     network.eval()
-    accuracies, margins, rewards = [], [], []
+    correct = torch.zeros((), device=device)
+    margin_sum = torch.zeros((), device=device)
+    reward_sum = torch.zeros((), device=device)
+    total = torch.zeros((), device=device)
     with torch.no_grad():
         for images, labels, _ in loader:
             images = images.to(device, non_blocking=True)
@@ -56,15 +59,19 @@ def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[flo
             _, output_spikes, rates = network(spikes)
             r_cls, r_margin, r_total = _compute_reward_components(rates, labels, args.beta_margin)
             preds = rates.argmax(dim=1)
-            accuracies.append((preds == labels).float().mean().item())
-            margins.append(r_margin.mean().item())
-            rewards.append(r_total.mean().item())
+            correct = correct + (preds == labels).sum()
+            margin_sum = margin_sum + r_margin.sum()
+            reward_sum = reward_sum + r_total.sum()
+            total = total + labels.numel()
     network.train()
-    return (
-        sum(accuracies) / len(accuracies) if accuracies else 0.0,
-        sum(margins) / len(margins) if margins else 0.0,
-        sum(rewards) / len(rewards) if rewards else 0.0,
-    )
+    total_count = total.item()
+    if total_count > 0:
+        return (
+            (correct / total).item(),
+            (margin_sum / total).item(),
+            (reward_sum / total).item(),
+        )
+    return 0.0, 0.0, 0.0
 
 
 def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
@@ -120,20 +127,28 @@ def run_semi(args, logger):
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
             event_buffer.reset()
-            state_in, extra_in, pre_in, post_in, batch_in = gather_events(
-                input_spikes, hidden_spikes, network.w_input_hidden, args.spike_array_len
+            gather_events(
+                input_spikes,
+                hidden_spikes,
+                network.w_input_hidden,
+                args.spike_array_len,
+                event_buffer,
+                0,
             )
-            state_out, extra_out, pre_out, post_out, batch_out = gather_events(
-                hidden_spikes, output_spikes, network.w_hidden_output, args.spike_array_len
+            gather_events(
+                hidden_spikes,
+                output_spikes,
+                network.w_hidden_output,
+                args.spike_array_len,
+                event_buffer,
+                1,
             )
-
-            if state_in.numel() > 0:
-                event_buffer.add(0, state_in, extra_in, pre_in, post_in, batch_in)
-            if state_out.numel() > 0:
-                event_buffer.add(1, state_out, extra_out, pre_out, post_out, batch_out)
 
             if len(event_buffer) > 0:
                 states, extras, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
+                # Actor/critic consume weight snapshots stored in extras during gather,
+                # keeping the post-simulation evaluation aligned with the rollout
+                # parameters (Theory.md episodic update assumption).
                 actions, log_probs_old, _ = actor(states, extras)
                 values_old = critic(states, extras)
 

@@ -33,10 +33,10 @@
   - **Theory 연계**: 텍스트 기반 로그 저장 요구를 충족.
 
 ### utils/event_utils.py
-- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None, max_pairs: int = 131072) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]`
-  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 희소 인덱싱으로 수집하되, `max_pairs` 단위로 pre/post 조합을 잘라 처리한다. `repeat_interleave`로 모든 조합을 한 번에 생성하지 않고, `nonzero` 결과를 블록 단위로 펼쳐 필요한 윈도우만 `_select_windows`로 가져오므로 `N_pre × N_post × N_spikes` 임시 텐서가 생성되지 않는다.
-  - **출력**: `(states, extras, pre_idx, post_idx, batch_idx)`이며 `extras`는 가중치(+선택적 레이어 정규화)와 이벤트 타입 원핫을 포함한다. 동일한 스파이크 텐서를 여러 레이어에서 재사용할 때 `padded_pre/post`를 전달하면 패딩 비용을 공유한다.
-  - **Theory 연계/최적화**: 스파이크 희소성을 활용하면서도 블록 처리로 GPU 메모리 피크를 제어해 대규모 fully-connected 층에서도 `Theory.md` 2.9.3의 이미지 단위 미니배치 규칙을 안전하게 만족시킨다.
+- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, buffer: EventBatchBuffer, connection_id: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None, max_pairs: int = 131072) -> None`
+  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 희소 인덱싱으로 수집하고, 반환 없이 `EventBatchBuffer.reserve`에서 받은 슬라이스에 직접 기록한다. `max_pairs` 블록 처리와 `padded_pre/post` 재사용으로 거대 임시 텐서와 중복 패딩을 제거하며, extras에는 호출 시점의 가중치 스냅샷(+선택적 정규화, 이벤트 타입 원핫)을 저장해 시뮬레이션 타이밍의 파라미터가 Actor 평가 시점에 그대로 전달됨을 코드 상에서 보증한다.
+  - **출력**: 없음. 스파이크 히스토리는 `torch.bool`로 유지해 VRAM/대역폭을 1/4 수준으로 줄이고, Actor/Critic는 forward 직전에 `float()` 캐스팅 후 CNN 처리한다.
+  - **Theory 연계/최적화**: triple-copy(리스트→`torch.cat`→`buffer.add`) 제거로 GPU 메모리 대역폭과 커널 런칭 오버헤드를 줄이며, `Theory.md` 2.9.3의 이벤트 미니배치 규칙을 유지한다.
 
 ## data 모듈
 ### data/mnist.py
@@ -104,7 +104,7 @@
   - **Theory 연계**: `Theory.md` 6.4절의 gradient mimicry 실험 네트워크.
 - `forward(input_spikes: Tensor) -> Tuple[List[Tensor], Tensor, Tensor]`
   - **인수**: `input_spikes`(배치×784×T).
-  - **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 `(batch, neurons, T)` 크기의 버퍼를 **사전 할당**하고 인덱싱으로 채운다. 파이썬 리스트 append와 루프 종료 후 `stack`을 제거해 GPU 동기화를 줄였으며, `T=0`이면 즉시 빈 텐서를 반환한다.
+  - **역할**: 타임스텝마다 surrogate LIF로 은닉/출력 막전위를 적분하면서 `(batch, neurons, T)` 크기의 버퍼를 **사전 할당**하고 인덱싱으로 채운다. 본 로직을 `@torch.jit.script` 함수로 분리해 타임루프를 커널 수준으로 퓨전, Python 오버헤드를 제거했고 `T=0`이면 즉시 빈 텐서를 반환한다.
   - **출력**: `([hidden_spikes_per_layer], output_spikes, firing_rates)`로 각 층/출력의 스파이크열과 평균 발화율.
   - **Theory 연계**: Teacher gradient 계산과 에이전트 시뮬레이션을 위한 differentiable forward.
 
@@ -118,13 +118,13 @@
   - **역할**: CNN 전단과 MLP 헤드를 구성하고 정책 분포 표준편차를 버퍼로 저장.
   - **Theory 연계**: `Theory.md` 2.7절 Gaussian Actor 구조.
 - `GaussianPolicy.forward(spike_history: torch.Tensor, extra_features: Optional[torch.Tensor] = None, actions: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]`
-  - **역할**: 스파이크 히스토리(및 추가 특징)를 인코딩해 평균 `mean`을 산출, 주어진 액션의 로그확률 또는 샘플 액션을 반환.
+  - **역할**: 스파이크 히스토리(및 추가 특징)를 인코딩해 평균 `mean`을 산출, 주어진 액션의 로그확률 또는 샘플 액션을 반환. 입력 히스토리는 `bool` 저장을 가정하며 forward 내부에서 `float()` 캐스팅 후 CNN에 투입된다.
   - **출력**: `(action, log_prob, mean)`.
   - **Theory 연계**: 상태 z로부터 Gaussian 정책 π(a|z)를 평가/샘플링.
 
 ### rl/value.py
 - `_CNNFront.forward(spike_history: torch.Tensor) -> torch.Tensor`
-  - **역할**: 정책과 동일한 CNN 구조로 특징 추출.
+  - **역할**: 정책과 동일한 CNN 구조로 특징 추출. `torch.bool` 히스토리를 `float()`로 변환해 CNN에 입력한다.
   - **Theory 연계**: Actor와 같은 입력 표현을 쓰는 Critic 요구사항.
 - `ValueFunction.__init__(extra_feature_dim: int = 0)`
   - **역할**: CNN+MLP 구성으로 V(z) 예측기 정의.
@@ -140,7 +140,7 @@
   - **Theory 연계**: 에피소드 단위 rollout 저장.
 - `EventBatchBuffer`
   - **역할**: 이벤트 단위 on-policy 배치를 GPU 상 연속 메모리에 저장한다. 초기 용량을 한 번(기본 4096개) 넉넉히 확보한 뒤 길이가 초과되면 두 배 확장해 리스트 기반 append 대비 메모리 파편화와 재할당을 줄인다.
-  - **동작/재사용**: `add`는 detch된 `(states, extras, pre/post/batch 인덱스, connection id)`를 미리 할당된 구간에 슬라이스로 기입하고 길이만 증가시킨다. 학습 루프에서는 에포크/배치마다 `reset()`으로 길이만 0으로 돌려 동일한 GPU 버퍼를 재사용해 `cudaMalloc/cudaFree` 호출을 제거한다. `batch_idx`는 항상 현재 이미지 미니배치의 로컬 인덱스(0~B-1)만 허용한다는 주석을 명시해 PPO 보상 매핑 오프셋 오류를 방지했다.
+  - **동작/재사용**: `reserve`가 요청 개수에 맞춰 슬라이스를 반환하며 길이를 즉시 증가시킨다. `gather_events`는 반환 없이 이 슬라이스에 직접 기록해 리스트→cat→copy triple-copy 경로를 제거한다. 스파이크 히스토리는 `torch.bool`로 저장하고 extras/인덱스는 detch된 값을 사용한다. 학습 루프에서는 에포크/배치마다 `reset()`으로 길이만 0으로 돌려 동일한 GPU 버퍼를 재사용하고, `batch_idx`는 항상 현재 이미지 미니배치의 로컬 인덱스(0~B-1)만 허용한다.
   - **Theory 연계/최적화**: `Theory.md` 2.9.3/2.9.4의 이미지 미니배치 기반 이벤트 업데이트를 유지하면서 GPU 메모리 연속성을 확보해 Actor 재연산 시 파편화를 방지한다. 에피소드 ID 필드는 미사용이라 제거해 GPU 사용량을 절약했다.
 - `append(state: torch.Tensor, extra_features: torch.Tensor, action: torch.Tensor, log_prob: torch.Tensor, value: torch.Tensor) -> None`
   - **역할**: 이벤트별 로컬 상태와 추가 특징을 포함해 detach한 기록을 버퍼에 추가.

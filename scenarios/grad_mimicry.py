@@ -32,7 +32,9 @@ def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch
 
 def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float, float]:
     network.eval()
-    accuracies, rewards = [], []
+    correct = torch.zeros((), device=device)
+    reward_sum = torch.zeros((), device=device)
+    total = torch.zeros((), device=device)
     with torch.no_grad():
         for images, labels, _ in loader:
             images = images.to(device, non_blocking=True)
@@ -40,18 +42,23 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
             spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
             _, _, firing_rates = network(spikes)
             preds = firing_rates.argmax(dim=1)
-            accuracies.append((preds == labels).float().mean().item())
+            correct = correct + (preds == labels).sum()
             true_rates = firing_rates.gather(1, labels.view(-1, 1)).squeeze(1)
             masked_rates = firing_rates.clone()
             masked_rates.scatter_(1, labels.view(-1, 1), -1e9)
             max_other, _ = masked_rates.max(dim=1)
             margin = true_rates - max_other
-            rewards.append(margin.mean().item())
+            reward_sum = reward_sum + margin.sum()
+            total = total + labels.numel()
     network.train()
-    return (
-        sum(accuracies) / len(accuracies) if accuracies else 0.0,
-        sum(rewards) / len(rewards) if rewards else 0.0,
-    )
+    total_count = total.item()
+    if total_count > 0:
+        acc = (correct / total).item()
+        reward_mean = (reward_sum / total).item()
+    else:
+        acc = 0.0
+        reward_mean = 0.0
+    return acc, reward_mean
 
 
 def _layer_indices(num_layers: int, scale: float) -> List[float]:
@@ -126,32 +133,30 @@ def run_grad(args, logger):
 
             prev_spikes = input_spikes
             for li, hidden_spikes in enumerate(hidden_spikes_list):
-                events = gather_events(
+                gather_events(
                     prev_spikes,
                     hidden_spikes,
                     network.w_layers[li],
                     args.spike_array_len,
+                    event_buffer,
+                    li,
                     l_norm=layer_norms[li],
                     padded_pre=_get_padded(prev_spikes),
                     padded_post=_get_padded(hidden_spikes),
                 )
-                if events[0].numel() > 0:
-                    batch_idx = events[4]
-                    event_buffer.add(li, events[0], events[1], events[2], events[3], batch_idx)
                 prev_spikes = hidden_spikes
 
-            events_out = gather_events(
+            gather_events(
                 prev_spikes,
                 output_spikes,
                 network.w_layers[-1],
                 args.spike_array_len,
+                event_buffer,
+                len(network.w_layers) - 1,
                 l_norm=layer_norms[-1],
                 padded_pre=_get_padded(prev_spikes),
                 padded_post=_get_padded(output_spikes),
             )
-            if events_out[0].numel() > 0:
-                batch_idx = events_out[4]
-                event_buffer.add(len(network.w_layers) - 1, events_out[0], events_out[1], events_out[2], events_out[3], batch_idx)
 
             rewards = torch.zeros(input_spikes.size(0), device=device)
 

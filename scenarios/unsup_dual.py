@@ -151,22 +151,24 @@ def run_unsup2(args, logger):
 
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
-            state_exc, extra_exc, pre_exc, post_exc, batch_exc = gather_events(
-                input_spikes, exc_spikes, network.w_input_exc, args.spike_array_len
+            event_buffer.reset()
+            gather_events(
+                input_spikes,
+                exc_spikes,
+                network.w_input_exc,
+                args.spike_array_len,
+                event_buffer,
+                0,
             )
-            state_inh, extra_inh, pre_inh, post_inh, batch_inh = gather_events(
+            gather_events(
                 inh_spikes,
                 exc_spikes,
                 network.w_inh_exc,
                 args.spike_array_len,
+                event_buffer,
+                1,
                 valid_mask=network.inh_exc_mask,
             )
-
-            event_buffer.reset()
-            if state_exc.numel() > 0:
-                event_buffer.add(0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
-            if state_inh.numel() > 0:
-                event_buffer.add(1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
 
             epoch_sparse.append(r_sparse.detach())
             epoch_div.append(r_div.detach())
@@ -185,6 +187,9 @@ def run_unsup2(args, logger):
                     batch_exc_events = batch_idx_events[exc_mask]
                     pre_exc_events = pre_idx[exc_mask]
                     post_exc_events = post_idx[exc_mask]
+                    # Actor sees extras built from the simulation-time weights captured
+                    # in gather_events, ensuring on-policy consistency when evaluating
+                    # actions after the episode rollout.
                     actions_exc, logp_exc, _ = actor_exc(states_exc, extras_exc)
                     values_exc = critic_exc(states_exc, extras_exc)
                     returns_exc = rewards_tensor[batch_exc_events]

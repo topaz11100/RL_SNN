@@ -166,21 +166,23 @@ def run_unsup1(args, logger):
 
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
-            state_exc, extra_exc, pre_exc, post_exc, batch_exc = gather_events(
-                input_spikes, exc_spikes, network.w_input_exc, args.spike_array_len
+            gather_events(
+                input_spikes,
+                exc_spikes,
+                network.w_input_exc,
+                args.spike_array_len,
+                event_buffer,
+                0,
             )
-            state_inh, extra_inh, pre_inh, post_inh, batch_inh = gather_events(
+            gather_events(
                 inh_spikes,
                 exc_spikes,
                 network.w_inh_exc,
                 args.spike_array_len,
+                event_buffer,
+                1,
                 valid_mask=network.inh_exc_mask,
             )
-
-            if state_exc.numel() > 0:
-                event_buffer.add(0, state_exc, extra_exc, pre_exc, post_exc, batch_exc)
-            if state_inh.numel() > 0:
-                event_buffer.add(1, state_inh, extra_inh, pre_inh, post_inh, batch_inh)
 
             epoch_sparse.append(r_sparse.detach())
             epoch_div.append(r_div.detach())
@@ -191,6 +193,9 @@ def run_unsup1(args, logger):
                 states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
                 rewards_tensor = total_reward.detach()
 
+                # Extras already contain the weight snapshot captured during gather_events,
+                # aligning the Actor input with the simulation-time parameters (Theory 2.x on
+                # episode-level updates).
                 actions, log_probs_old, values_old = _forward_in_event_batches(
                     actor, critic, states, extras, batch_size=args.event_batch_size
                 )
