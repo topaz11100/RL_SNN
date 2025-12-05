@@ -146,9 +146,9 @@ def _collect_firing_rates(network: DiehlCookNetwork, loader, device, args):
     rates, labels = [], []
     with torch.no_grad():
         for images, lbls, _ in loader:
-            images = images.to(device)
-            lbls = lbls.to(device)
-            spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            lbls = lbls.to(device, non_blocking=True)
+            spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate)
             exc_spikes, _ = network(spikes)
             rates.append(exc_spikes.mean(dim=2).detach().cpu())
             labels.append(lbls.detach().cpu())
@@ -205,9 +205,9 @@ def run_unsup2(args, logger):
     for epoch in range(1, args.num_epochs + 1):
         epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
         for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
-            images = images.to(device)
-            indices = indices.to(device)
-            input_spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            indices = indices.to(device, non_blocking=True)
+            input_spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate)
             exc_spikes, inh_spikes = network(input_spikes)
 
             r_sparse, firing_rates = _compute_sparse_reward(exc_spikes, args.rho_target)

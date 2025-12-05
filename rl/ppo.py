@@ -21,7 +21,7 @@ def ppo_update(
     num_samples = states.size(0)
 
     for _ in range(ppo_epochs):
-        indices = torch.randperm(num_samples)
+        indices = torch.randperm(num_samples, device=states.device)
         for start in range(0, num_samples, batch_size):
             end = start + batch_size
             batch_idx = indices[start:end]

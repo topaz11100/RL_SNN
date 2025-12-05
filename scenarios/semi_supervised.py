@@ -130,9 +130,9 @@ def _evaluate(network: SemiSupervisedNetwork, loader, device, args) -> Tuple[flo
     accuracies, margins, rewards = [], [], []
     with torch.no_grad():
         for images, labels, _ in loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate)
             _, output_spikes, rates = network(spikes)
             r_cls, r_margin, r_total = _compute_reward_components(rates, labels, args.beta_margin)
             preds = rates.argmax(dim=1)
@@ -187,9 +187,9 @@ def run_semi(args, logger):
     for epoch in range(1, args.num_epochs + 1):
         epoch_acc, epoch_margin, epoch_reward = [], [], []
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
-            images = images.to(device)
-            labels = labels.to(device)
-            input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate).to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate)
             hidden_spikes, output_spikes, firing_rates = network(input_spikes)
 
             preds = firing_rates.argmax(dim=1)
