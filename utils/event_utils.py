@@ -19,6 +19,91 @@ def _select_windows(
     return padded_spikes[batch_idx.unsqueeze(1), neuron_idx.unsqueeze(1), gather_times]
 
 
+def _pairwise_indices(
+    primary_events: torch.Tensor,
+    other_count: int,
+    *,
+    max_pairs: int,
+    device,
+    valid_mask: torch.Tensor | None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    """Chunked pre/post 페어 인덱스 생성.
+
+    repeat_interleave 로 전체 조합을 한 번에 만들 때 발생하는 거대한 임시
+    텐서를 피하기 위해, `max_pairs` 에 맞춰 이벤트 블록을 잘라 처리한다.
+    """
+
+    batch_list: list[torch.Tensor] = []
+    primary_list: list[torch.Tensor] = []
+    other_list: list[torch.Tensor] = []
+
+    if primary_events.numel() == 0:
+        return batch_list, primary_list, other_list
+
+    block_events = max(1, max_pairs // max(other_count, 1))
+    other_indices_full = torch.arange(other_count, device=device)
+
+    for start in range(0, primary_events.size(0), block_events):
+        end = min(start + block_events, primary_events.size(0))
+        chunk = primary_events[start:end]
+        # (chunk, other_count)
+        batch_grid = chunk[:, 0].unsqueeze(1).expand(-1, other_count)
+        primary_grid = chunk[:, 1].unsqueeze(1).expand(-1, other_count)
+        other_grid = other_indices_full.unsqueeze(0).expand(chunk.size(0), -1)
+        time_grid = chunk[:, 2].unsqueeze(1).expand(-1, other_count)
+
+        flat_batch = batch_grid.reshape(-1)
+        flat_primary = primary_grid.reshape(-1)
+        flat_other = other_grid.reshape(-1)
+        flat_time = time_grid.reshape(-1)
+
+        if valid_mask is not None:
+            keep = valid_mask[flat_primary, flat_other].nonzero(as_tuple=False).squeeze(1)
+            flat_batch = flat_batch.index_select(0, keep)
+            flat_primary = flat_primary.index_select(0, keep)
+            flat_other = flat_other.index_select(0, keep)
+            flat_time = flat_time.index_select(0, keep)
+
+        if flat_batch.numel() == 0:
+            continue
+
+        batch_list.append(torch.stack([flat_batch, flat_time], dim=1))
+        primary_list.append(flat_primary)
+        other_list.append(flat_other)
+
+    return batch_list, primary_list, other_list
+
+
+def _build_states_and_extras(
+    padded_pre: torch.Tensor,
+    padded_post: torch.Tensor,
+    window: int,
+    weights: torch.Tensor,
+    *,
+    l_norm: float | None,
+    event_type: torch.Tensor,
+    batch_and_time: torch.Tensor,
+    pre_idx: torch.Tensor,
+    post_idx: torch.Tensor,
+    device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # batch_and_time는 shape (N, 2) = [batch, time]
+    batches = batch_and_time[:, 0]
+    times = batch_and_time[:, 1]
+
+    pre_hist = _select_windows(padded_pre, batches, pre_idx, times, window)
+    post_hist = _select_windows(padded_post, batches, post_idx, times, window)
+
+    states = torch.stack([pre_hist, post_hist], dim=1)
+    weights_sel = weights[pre_idx, post_idx].unsqueeze(1)
+    extras_parts = [weights_sel]
+    if l_norm is not None:
+        extras_parts.append(torch.full_like(weights_sel, l_norm))
+    extras_parts.append(_expand_event_type(event_type, weights_sel.size(0), device, weights.dtype))
+    extras = torch.cat(extras_parts, dim=1)
+    return states, extras
+
+
 def gather_events(
     pre_spikes: torch.Tensor,
     post_spikes: torch.Tensor,
@@ -29,20 +114,19 @@ def gather_events(
     valid_mask: torch.Tensor | None = None,
     padded_pre: torch.Tensor | None = None,
     padded_post: torch.Tensor | None = None,
+    max_pairs: int = 131072,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Collect sparse pre/post spike histories without building dense unfold buffers.
+    """Sparse 이벤트 수집을 위한 GPU 친화적 페어 생성.
 
-    Windows are sliced directly around non-zero spikes using advanced indexing to
-    avoid the `(batch, neurons, T, window)` allocations that previously caused
-    OOM on large layers.
+    * `max_pairs` 로 pre/post 조합 수를 제한해 거대 임시 텐서 생성 없이
+      블록 단위로 처리한다.
+    * `padded_pre/post`를 재사용하여 pad 비용을 줄인다.
     """
 
     device = pre_spikes.device
     n_pre = pre_spikes.shape[1]
     n_post = post_spikes.shape[1]
 
-    # Allow callers to reuse already padded tensors to avoid redundant F.pad
-    # allocations when the same spike trains serve as pre/post across layers.
     padded_pre = padded_pre if padded_pre is not None else F.pad(pre_spikes, (window - 1, 0))
     padded_post = padded_post if padded_post is not None else F.pad(post_spikes, (window - 1, 0))
 
@@ -53,64 +137,50 @@ def gather_events(
     batch_indices_list: list[torch.Tensor] = []
 
     pre_events = pre_spikes.nonzero(as_tuple=False)
-    if pre_events.numel() > 0:
-        batch_pre = pre_events[:, 0].repeat_interleave(n_post)
-        pre_idx = pre_events[:, 1].repeat_interleave(n_post)
-        time_idx = pre_events[:, 2].repeat_interleave(n_post)
-        post_idx = torch.arange(n_post, device=device).repeat(pre_events.size(0))
-
-        if valid_mask is not None:
-            keep = valid_mask[pre_idx, post_idx].nonzero(as_tuple=False).squeeze(1)
-            batch_pre = batch_pre.index_select(0, keep)
-            pre_idx = pre_idx.index_select(0, keep)
-            time_idx = time_idx.index_select(0, keep)
-            post_idx = post_idx.index_select(0, keep)
-
-        if pre_idx.numel() > 0:
-            pre_hist = _select_windows(padded_pre, batch_pre, pre_idx, time_idx, window)
-            post_hist = _select_windows(padded_post, batch_pre, post_idx, time_idx, window)
-            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
-
-            weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
-            extras_parts = [weights_pre]
-            if l_norm is not None:
-                extras_parts.append(torch.full_like(weights_pre, l_norm))
-            extras_parts.append(_expand_event_type(_EVENT_TYPE_PRE, weights_pre.size(0), device, weights.dtype))
-            extras_list.append(torch.cat(extras_parts, dim=1))
-
-            pre_indices_list.append(pre_idx)
-            post_indices_list.append(post_idx)
-            batch_indices_list.append(batch_pre)
+    batch_time_pre, primary_pre, other_pre = _pairwise_indices(
+        pre_events, n_post, max_pairs=max_pairs, device=device, valid_mask=valid_mask
+    )
+    for bt, pre_idx, post_idx in zip(batch_time_pre, primary_pre, other_pre):
+        states, extras = _build_states_and_extras(
+            padded_pre,
+            padded_post,
+            window,
+            weights,
+            l_norm=l_norm,
+            event_type=_EVENT_TYPE_PRE,
+            batch_and_time=bt,
+            pre_idx=pre_idx,
+            post_idx=post_idx,
+            device=device,
+        )
+        states_list.append(states)
+        extras_list.append(extras)
+        pre_indices_list.append(pre_idx)
+        post_indices_list.append(post_idx)
+        batch_indices_list.append(bt[:, 0])
 
     post_events = post_spikes.nonzero(as_tuple=False)
-    if post_events.numel() > 0:
-        batch_post = post_events[:, 0].repeat_interleave(n_pre)
-        post_idx = post_events[:, 1].repeat_interleave(n_pre)
-        time_idx = post_events[:, 2].repeat_interleave(n_pre)
-        pre_idx = torch.arange(n_pre, device=device).repeat(post_events.size(0))
-
-        if valid_mask is not None:
-            keep = valid_mask[pre_idx, post_idx].nonzero(as_tuple=False).squeeze(1)
-            batch_post = batch_post.index_select(0, keep)
-            pre_idx = pre_idx.index_select(0, keep)
-            time_idx = time_idx.index_select(0, keep)
-            post_idx = post_idx.index_select(0, keep)
-
-        if pre_idx.numel() > 0:
-            pre_hist = _select_windows(padded_pre, batch_post, pre_idx, time_idx, window)
-            post_hist = _select_windows(padded_post, batch_post, post_idx, time_idx, window)
-            states_list.append(torch.stack([pre_hist, post_hist], dim=1))
-
-            weights_post = weights[pre_idx, post_idx].unsqueeze(1)
-            extras_parts = [weights_post]
-            if l_norm is not None:
-                extras_parts.append(torch.full_like(weights_post, l_norm))
-            extras_parts.append(_expand_event_type(_EVENT_TYPE_POST, weights_post.size(0), device, weights.dtype))
-            extras_list.append(torch.cat(extras_parts, dim=1))
-
-            pre_indices_list.append(pre_idx)
-            post_indices_list.append(post_idx)
-            batch_indices_list.append(batch_post)
+    batch_time_post, primary_post, other_post = _pairwise_indices(
+        post_events, n_pre, max_pairs=max_pairs, device=device, valid_mask=valid_mask
+    )
+    for bt, pre_idx, post_idx in zip(batch_time_post, other_post, primary_post):
+        states, extras = _build_states_and_extras(
+            padded_pre,
+            padded_post,
+            window,
+            weights,
+            l_norm=l_norm,
+            event_type=_EVENT_TYPE_POST,
+            batch_and_time=bt,
+            pre_idx=pre_idx,
+            post_idx=post_idx,
+            device=device,
+        )
+        states_list.append(states)
+        extras_list.append(extras)
+        pre_indices_list.append(pre_idx)
+        post_indices_list.append(post_idx)
+        batch_indices_list.append(bt[:, 0])
 
     if not states_list:
         empty_state = torch.empty((0, 2, window), device=device, dtype=pre_spikes.dtype)

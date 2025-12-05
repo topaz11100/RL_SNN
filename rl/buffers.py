@@ -54,23 +54,73 @@ class EpisodeBuffer:
 
 
 class EventBatchBuffer:
-    """Buffer to accumulate events across multiple episodes before PPO updates.
+    """GPU 친화적 이벤트 버퍼.
 
-    List-backed storage keeps per-event tensors on device without repeated
-    reallocation; a running length counter avoids recomputing sizes when the
-    event volume is large. If event counts grow further, consider replacing the
-    lists with pre-allocated chunks shaped from observed statistics.
+    Theory 2.9.3의 이미지 단위 미니배치 구성을 유지하면서도, 리스트 append로
+    인한 메모리 파편화를 줄이기 위해 고정 크기 블록을 미리 할당하고 필요
+    시 두 배 확장한다. 동일한 디바이스/데이터타입을 일관되게 유지하여
+    연속적인 GPU 메모리 배치를 보장한다.
     """
 
-    def __init__(self):
-        self.states: List[torch.Tensor] = []
-        self.extra_features: List[torch.Tensor] = []
-        self.episode_ids: List[torch.Tensor] = []
-        self.batch_indices: List[torch.Tensor] = []
-        self.connection_ids: List[torch.Tensor] = []
-        self.pre_indices: List[torch.Tensor] = []
-        self.post_indices: List[torch.Tensor] = []
-        self._length: int = 0
+    def __init__(self, initial_capacity: int = 1024):
+        self.initial_capacity = initial_capacity
+        self.capacity = 0
+        self.length = 0
+
+        self.states: torch.Tensor | None = None
+        self.extras: torch.Tensor | None = None
+        self.episode_ids: torch.Tensor | None = None
+        self.batch_indices: torch.Tensor | None = None
+        self.connection_ids: torch.Tensor | None = None
+        self.pre_indices: torch.Tensor | None = None
+        self.post_indices: torch.Tensor | None = None
+
+    def _allocate(self, count: int, state_shape: torch.Size, extras_dim: int, device, dtype, extras_dtype) -> None:
+        self.capacity = max(self.initial_capacity, count)
+        self.states = torch.empty((self.capacity, *state_shape[1:]), device=device, dtype=dtype)
+        self.extras = torch.empty((self.capacity, extras_dim), device=device, dtype=extras_dtype)
+        self.episode_ids = torch.empty((self.capacity,), device=device, dtype=torch.long)
+        self.batch_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
+        self.connection_ids = torch.empty((self.capacity,), device=device, dtype=torch.long)
+        self.pre_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
+        self.post_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
+
+    def _ensure_capacity(self, additional: int) -> None:
+        if self.states is None:
+            raise RuntimeError("Buffer not allocated")
+        needed = self.length + additional
+        if needed <= self.capacity:
+            return
+        new_capacity = max(needed, self.capacity * 2)
+        self.states = torch.cat(
+            [self.states, torch.empty((new_capacity - self.capacity, *self.states.shape[1:]), device=self.states.device, dtype=self.states.dtype)],
+            dim=0,
+        )
+        self.extras = torch.cat(
+            [self.extras, torch.empty((new_capacity - self.capacity, self.extras.size(1)), device=self.extras.device, dtype=self.extras.dtype)],
+            dim=0,
+        )
+        self.episode_ids = torch.cat(
+            [self.episode_ids, torch.empty((new_capacity - self.capacity,), device=self.episode_ids.device, dtype=self.episode_ids.dtype)],
+            dim=0,
+        )
+        self.batch_indices = torch.cat(
+            [self.batch_indices, torch.empty((new_capacity - self.capacity,), device=self.batch_indices.device, dtype=self.batch_indices.dtype)],
+            dim=0,
+        )
+        self.connection_ids = torch.cat(
+            [self.connection_ids, torch.empty((new_capacity - self.capacity,), device=self.connection_ids.device, dtype=self.connection_ids.dtype)],
+            dim=0,
+        )
+        self.pre_indices = torch.cat(
+            [self.pre_indices, torch.empty((new_capacity - self.capacity,), device=self.pre_indices.device, dtype=self.pre_indices.dtype)],
+            dim=0,
+        )
+        self.post_indices = torch.cat(
+            [self.post_indices, torch.empty((new_capacity - self.capacity,), device=self.post_indices.device, dtype=self.post_indices.dtype)],
+            dim=0,
+        )
+        self.capacity = new_capacity
 
     def add(
         self,
@@ -86,33 +136,43 @@ class EventBatchBuffer:
             return
         count = states.size(0)
         device = states.device
-        self.states.append(states.detach())
-        self.extra_features.append(extras.detach())
+
+        if self.states is None:
+            extras_dim = extras.size(1) if extras.numel() > 0 else 0
+            self._allocate(count, states.shape, extras_dim, device, states.dtype, extras.dtype if extras_dim > 0 else states.dtype)
+        else:
+            self._ensure_capacity(count)
+
+        end = self.length + count
+        self.states[self.length : end] = states.detach()
+        if extras.numel() > 0:
+            self.extras[self.length : end] = extras.detach()
         if torch.is_tensor(episode_id):
             episode_tensor = episode_id.to(device=device, dtype=torch.long)
         else:
             episode_tensor = torch.full((count,), episode_id, device=device, dtype=torch.long)
-        self.episode_ids.append(episode_tensor)
-        self.connection_ids.append(torch.full((count,), connection_id, device=device, dtype=torch.long))
-        self.pre_indices.append(pre_idx)
-        self.post_indices.append(post_idx)
-        self.batch_indices.append(batch_idx.to(device=device, dtype=torch.long))
-        self._length += count
+        self.episode_ids[self.length : end] = episode_tensor
+        self.connection_ids[self.length : end] = connection_id
+        self.pre_indices[self.length : end] = pre_idx
+        self.post_indices[self.length : end] = post_idx
+        self.batch_indices[self.length : end] = batch_idx.to(device=device, dtype=torch.long)
+        self.length = end
 
     def flatten(self, allow_empty: bool = False) -> Tuple[torch.Tensor, ...]:
-        if not self.states:
+        if self.states is None or self.length == 0:
             if allow_empty:
                 empty = torch.empty(0)
                 return empty, empty, empty, empty, empty, empty, empty
             raise ValueError("No events were added to the buffer")
-        states = torch.cat(self.states, dim=0)
-        extras = torch.cat(self.extra_features, dim=0) if self.extra_features else torch.empty(0, device=states.device)
-        episode_ids = torch.cat(self.episode_ids, dim=0)
-        connection_ids = torch.cat(self.connection_ids, dim=0)
-        pre_idx = torch.cat(self.pre_indices, dim=0)
-        post_idx = torch.cat(self.post_indices, dim=0)
-        batch_idx = torch.cat(self.batch_indices, dim=0)
+
+        states = self.states[: self.length]
+        extras = self.extras[: self.length]
+        episode_ids = self.episode_ids[: self.length]
+        connection_ids = self.connection_ids[: self.length]
+        pre_idx = self.pre_indices[: self.length]
+        post_idx = self.post_indices[: self.length]
+        batch_idx = self.batch_indices[: self.length]
         return states, extras, episode_ids, connection_ids, pre_idx, post_idx, batch_idx
 
     def __len__(self) -> int:
-        return self._length
+        return self.length
