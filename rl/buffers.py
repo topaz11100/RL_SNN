@@ -54,7 +54,13 @@ class EpisodeBuffer:
 
 
 class EventBatchBuffer:
-    """Buffer to accumulate events across multiple episodes before PPO updates."""
+    """Buffer to accumulate events across multiple episodes before PPO updates.
+
+    List-backed storage keeps per-event tensors on device without repeated
+    reallocation; a running length counter avoids recomputing sizes when the
+    event volume is large. If event counts grow further, consider replacing the
+    lists with pre-allocated chunks shaped from observed statistics.
+    """
 
     def __init__(self):
         self.states: List[torch.Tensor] = []
@@ -64,6 +70,7 @@ class EventBatchBuffer:
         self.connection_ids: List[torch.Tensor] = []
         self.pre_indices: List[torch.Tensor] = []
         self.post_indices: List[torch.Tensor] = []
+        self._length: int = 0
 
     def add(
         self,
@@ -90,6 +97,7 @@ class EventBatchBuffer:
         self.pre_indices.append(pre_idx)
         self.post_indices.append(post_idx)
         self.batch_indices.append(batch_idx.to(device=device, dtype=torch.long))
+        self._length += count
 
     def flatten(self) -> Tuple[torch.Tensor, ...]:
         if not self.states:
@@ -104,6 +112,4 @@ class EventBatchBuffer:
         return states, extras, episode_ids, connection_ids, pre_idx, post_idx, batch_idx
 
     def __len__(self) -> int:
-        if not self.states:
-            return 0
-        return sum(t.size(0) for t in self.states)
+        return self._length

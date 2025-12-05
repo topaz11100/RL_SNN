@@ -16,6 +16,14 @@ from snn.network_grad_mimicry import GradMimicryNetwork
 from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
 
 
+_EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
+_EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
+
+
+def _expand_event_type(base: torch.Tensor, count: int, device, dtype) -> torch.Tensor:
+    return base.to(device=device, dtype=dtype).expand(count, -1)
+
+
 def _ensure_metrics_file(path: str, header: str) -> None:
     if not os.path.exists(path):
         with open(path, "w") as f:
@@ -54,7 +62,7 @@ def _gather_events(
 
         weights_pre = weights[pre_idx, post_idx].unsqueeze(1)
         l_norm_tensor_pre = torch.full_like(weights_pre, l_norm)
-        event_type = torch.tensor([1.0, 0.0], device=device, dtype=weights.dtype).expand(weights_pre.size(0), -1)
+        event_type = _expand_event_type(_EVENT_TYPE_PRE, weights_pre.size(0), device, weights.dtype)
         extras_list.append(torch.cat([weights_pre, l_norm_tensor_pre, event_type], dim=1))
 
         pre_indices_list.append(pre_idx)
@@ -74,7 +82,7 @@ def _gather_events(
 
         weights_post = weights[pre_idx, post_idx].unsqueeze(1)
         l_norm_tensor_post = torch.full_like(weights_post, l_norm)
-        event_type = torch.tensor([0.0, 1.0], device=device, dtype=weights.dtype).expand(weights_post.size(0), -1)
+        event_type = _expand_event_type(_EVENT_TYPE_POST, weights_post.size(0), device, weights.dtype)
         extras_list.append(torch.cat([weights_post, l_norm_tensor_post, event_type], dim=1))
 
         pre_indices_list.append(pre_idx)
@@ -87,13 +95,20 @@ def _gather_events(
         empty_index = torch.empty((0,), device=device, dtype=torch.long)
         return empty_state, empty_extras, empty_index, empty_index, empty_index
 
-    return (
-        torch.cat(states_list, dim=0),
-        torch.cat(extras_list, dim=0),
-        torch.cat(pre_indices_list, dim=0),
-        torch.cat(post_indices_list, dim=0),
-        torch.cat(batch_indices_list, dim=0),
-    )
+    if len(states_list) == 1:
+        states_cat = states_list[0]
+        extras_cat = extras_list[0]
+        pre_cat = pre_indices_list[0]
+        post_cat = post_indices_list[0]
+        batch_cat = batch_indices_list[0]
+    else:
+        states_cat = torch.cat(states_list, dim=0)
+        extras_cat = torch.cat(extras_list, dim=0)
+        pre_cat = torch.cat(pre_indices_list, dim=0)
+        post_cat = torch.cat(post_indices_list, dim=0)
+        batch_cat = torch.cat(batch_indices_list, dim=0)
+
+    return states_cat, extras_cat, pre_cat, post_cat, batch_cat
 
 
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -183,7 +198,7 @@ def run_grad(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             batch_acc_tensor = (preds == labels).float().mean()
-            epoch_acc.append(batch_acc_tensor.detach().cpu())
+            epoch_acc.append(batch_acc_tensor.detach())
 
             event_buffer = EventBatchBuffer()
 
@@ -278,18 +293,18 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach().cpu().flatten())
-                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach().cpu().flatten())
+                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach())
+                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach())
 
-                delta_t_values.append(_extract_delta_t(states).detach().cpu())
-                delta_d_values.append(actions.detach().cpu())
+                delta_t_values.append(_extract_delta_t(states).detach())
+                delta_d_values.append(actions.detach())
 
-                epoch_reward.append(rewards.detach().cpu())
-                epoch_align.append(rewards.detach().cpu())
+                epoch_reward.append(rewards.detach())
+                epoch_align.append(rewards.detach())
             else:
                 zero_reward = torch.zeros(input_spikes.size(0), device=device)
-                epoch_reward.append(zero_reward.detach().cpu())
-                epoch_align.append(zero_reward.detach().cpu())
+                epoch_reward.append(zero_reward.detach())
+                epoch_align.append(zero_reward.detach())
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -302,8 +317,8 @@ def run_grad(args, logger):
                 )
 
         mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
-        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0)
-        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0)
+        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
+        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0, device=device)
         mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
         mean_align = align_tensor.mean().item() if align_tensor.numel() > 0 else 0.0
 
