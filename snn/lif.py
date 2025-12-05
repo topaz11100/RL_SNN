@@ -2,8 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import torch
-from torch import Tensor
-from torch import nn
+from torch import Tensor, nn
 
 
 @dataclass
