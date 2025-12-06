@@ -37,6 +37,21 @@ def _compute_sparse_reward(exc_spikes: torch.Tensor, rho_target: float) -> Tuple
 
 
 
+def _forward_in_event_batches(actor, critic, states, extras, batch_size):
+    actions, log_probs, values = [], [], []
+    extras_available = extras.numel() > 0
+    for start in range(0, states.size(0), batch_size):
+        end = start + batch_size
+        states_mb = states[start:end]
+        extras_mb = extras[start:end] if extras_available else None
+        action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
+        value_mb = critic(states_mb, extras_mb)
+        actions.append(action_mb)
+        log_probs.append(log_prob_mb)
+        values.append(value_mb)
+    return torch.cat(actions, dim=0), torch.cat(log_probs, dim=0), torch.cat(values, dim=0)
+
+
 def _scatter_updates(
     delta: torch.Tensor,
     pre_idx: torch.Tensor,
@@ -44,11 +59,11 @@ def _scatter_updates(
     weights: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
 ) -> None:
-    delta_matrix = torch.zeros_like(weights)
-    delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
+    if delta.numel() == 0:
+        return
     if valid_mask is not None:
-        delta_matrix = delta_matrix * valid_mask
-    weights.data.add_(delta_matrix)
+        delta = delta * valid_mask[pre_idx, post_idx]
+    weights.index_put_((pre_idx, post_idx), delta, accumulate=True)
 
 
 def _collect_firing_rates(network: DiehlCookNetwork, loader, device, args):
@@ -152,6 +167,15 @@ def run_unsup2(args, logger):
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
             event_buffer.reset()
+
+            padded_cache = {}
+
+            def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+                key = id(spikes)
+                if key not in padded_cache:
+                    padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+                return padded_cache[key]
+
             gather_events(
                 input_spikes,
                 exc_spikes,
@@ -159,6 +183,8 @@ def run_unsup2(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 0,
+                padded_pre=_get_padded(input_spikes),
+                padded_post=_get_padded(exc_spikes),
             )
             gather_events(
                 inh_spikes,
@@ -168,6 +194,8 @@ def run_unsup2(args, logger):
                 event_buffer,
                 1,
                 valid_mask=network.inh_exc_mask,
+                padded_pre=_get_padded(inh_spikes),
+                padded_post=_get_padded(exc_spikes),
             )
 
             epoch_sparse.append(r_sparse.detach())
@@ -190,8 +218,13 @@ def run_unsup2(args, logger):
                     # Actor sees extras built from the simulation-time weights captured
                     # in gather_events, ensuring on-policy consistency when evaluating
                     # actions after the episode rollout.
-                    actions_exc, logp_exc, _ = actor_exc(states_exc, extras_exc)
-                    values_exc = critic_exc(states_exc, extras_exc)
+                    actions_exc, logp_exc, values_exc = _forward_in_event_batches(
+                        actor_exc,
+                        critic_exc,
+                        states_exc,
+                        extras_exc,
+                        batch_size=args.event_batch_size,
+                    )
                     returns_exc = rewards_tensor[batch_exc_events]
                     adv_exc = returns_exc - values_exc.detach()
 
@@ -227,8 +260,13 @@ def run_unsup2(args, logger):
                     batch_inh_events = batch_idx_events[inh_mask]
                     pre_inh_events = pre_idx[inh_mask]
                     post_inh_events = post_idx[inh_mask]
-                    actions_inh, logp_inh, _ = actor_inh(states_inh, extras_inh)
-                    values_inh = critic_inh(states_inh, extras_inh)
+                    actions_inh, logp_inh, values_inh = _forward_in_event_batches(
+                        actor_inh,
+                        critic_inh,
+                        states_inh,
+                        extras_inh,
+                        batch_size=args.event_batch_size,
+                    )
                     returns_inh = rewards_tensor[batch_inh_events]
                     adv_inh = returns_inh - values_inh.detach()
 

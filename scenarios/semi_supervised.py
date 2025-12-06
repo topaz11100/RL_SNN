@@ -2,6 +2,7 @@ import os
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EventBatchBuffer
@@ -21,10 +22,25 @@ def _ensure_metrics_file(path: str, header: str) -> None:
             f.write(header + "\n")
 
 
+def _forward_in_event_batches(actor, critic, states, extras, batch_size):
+    actions, log_probs, values = [], [], []
+    extras_available = extras.numel() > 0
+    for start in range(0, states.size(0), batch_size):
+        end = start + batch_size
+        states_mb = states[start:end]
+        extras_mb = extras[start:end] if extras_available else None
+        action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
+        value_mb = critic(states_mb, extras_mb)
+        actions.append(action_mb)
+        log_probs.append(log_prob_mb)
+        values.append(value_mb)
+    return torch.cat(actions, dim=0), torch.cat(log_probs, dim=0), torch.cat(values, dim=0)
+
+
 def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> None:
-    delta_matrix = torch.zeros_like(weights)
-    delta_matrix.index_put_((pre_idx, post_idx), delta, accumulate=True)
-    weights.data.add_(delta_matrix)
+    if delta.numel() == 0:
+        return
+    weights.index_put_((pre_idx, post_idx), delta, accumulate=True)
 
 
 def _compute_reward_components(
@@ -127,6 +143,14 @@ def run_semi(args, logger):
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
             event_buffer.reset()
+
+            padded_cache = {}
+
+            def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+                key = id(spikes)
+                if key not in padded_cache:
+                    padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+                return padded_cache[key]
             gather_events(
                 input_spikes,
                 hidden_spikes,
@@ -134,6 +158,8 @@ def run_semi(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 0,
+                padded_pre=_get_padded(input_spikes),
+                padded_post=_get_padded(hidden_spikes),
             )
             gather_events(
                 hidden_spikes,
@@ -142,6 +168,8 @@ def run_semi(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 1,
+                padded_pre=_get_padded(hidden_spikes),
+                padded_post=_get_padded(output_spikes),
             )
 
             if len(event_buffer) > 0:
@@ -149,8 +177,9 @@ def run_semi(args, logger):
                 # Actor/critic consume weight snapshots stored in extras during gather,
                 # keeping the post-simulation evaluation aligned with the rollout
                 # parameters (Theory.md episodic update assumption).
-                actions, log_probs_old, _ = actor(states, extras)
-                values_old = critic(states, extras)
+                actions, log_probs_old, values_old = _forward_in_event_batches(
+                    actor, critic, states, extras, batch_size=args.event_batch_size
+                )
 
                 returns = r_total.detach()[batch_indices]
                 advantages = returns - values_old.detach()

@@ -64,11 +64,9 @@ def _apply_weight_updates(delta, connection_ids, pre_idx, post_idx, network, arg
             delta_conn = delta[event_mask]
             pre_conn = pre_idx[event_mask]
             post_conn = post_idx[event_mask]
-            delta_matrix = torch.zeros_like(weight)
-            delta_matrix.index_put_((pre_conn, post_conn), delta_conn, accumulate=True)
             if mask is not None:
-                delta_matrix = delta_matrix * mask
-            weight.add_(delta_matrix)
+                delta_conn = delta_conn * mask[pre_conn, post_conn]
+            weight.index_put_((pre_conn, post_conn), delta_conn, accumulate=True)
             weight.clamp_(clip_min, clip_max)
 
 
@@ -166,6 +164,14 @@ def run_unsup1(args, logger):
 
             total_reward = args.alpha_sparse * r_sparse + args.alpha_div * r_div + args.alpha_stab * r_stab
 
+            padded_cache = {}
+
+            def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+                key = id(spikes)
+                if key not in padded_cache:
+                    padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+                return padded_cache[key]
+
             gather_events(
                 input_spikes,
                 exc_spikes,
@@ -173,6 +179,8 @@ def run_unsup1(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 0,
+                padded_pre=_get_padded(input_spikes),
+                padded_post=_get_padded(exc_spikes),
             )
             gather_events(
                 inh_spikes,
@@ -182,6 +190,8 @@ def run_unsup1(args, logger):
                 event_buffer,
                 1,
                 valid_mask=network.inh_exc_mask,
+                padded_pre=_get_padded(inh_spikes),
+                padded_post=_get_padded(exc_spikes),
             )
 
             epoch_sparse.append(r_sparse.detach())
