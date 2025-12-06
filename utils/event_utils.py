@@ -83,10 +83,10 @@ def gather_events(
 ) -> None:
     """Sparse 이벤트를 직접 ``EventBatchBuffer``에 기록한다.
 
-    Triple-copy가 발생하던 리스트 → cat → add 경로를 제거하고, JIT friendly한
-    연속 버퍼에 즉시 기록하여 GPU 메모리 대역폭을 절약한다. `weights`는
-    호출 시점의 값을 detach하여 Actor가 시뮬레이션 당시 가중치에 대한
-    extras를 받도록 명시적으로 보장한다.
+    GPU OOM을 피하기 위해 이미지(배치) 단위로 이벤트를 생성하여 커다란
+    repeat_interleave 텐서를 생성하지 않는다. `weights`는 호출 시점의 값을
+    detach하여 Actor가 시뮬레이션 당시 가중치에 대한 extras를 받도록
+    명시적으로 보장한다.
     """
 
     device = pre_spikes.device
@@ -120,68 +120,71 @@ def gather_events(
     if valid_mask is not None:
         valid_mask = valid_mask.to(device=device, dtype=torch.bool)
 
-    # Pre-synaptic spikes paired with all post-synaptic neurons (masked if provided).
-    batch_pre, pre_indices, time_pre = _extract_events(pre_spikes)
-    if batch_pre.numel() > 0:
-        post_all = torch.arange(n_post, device=device)
-        repeat_factor = n_post
-        batch_rep = batch_pre.repeat_interleave(repeat_factor)
-        time_rep = time_pre.repeat_interleave(repeat_factor)
-        pre_rep = pre_indices.repeat_interleave(repeat_factor)
-        post_rep = post_all.repeat(batch_pre.size(0))
+    batch_size = pre_spikes.size(0)
+    post_all = torch.arange(n_post, device=device)
+    pre_all = torch.arange(n_pre, device=device)
 
-        if valid_mask is not None:
-            keep = valid_mask[pre_rep, post_rep]
-            batch_rep = batch_rep[keep]
-            time_rep = time_rep[keep]
-            pre_rep = pre_rep[keep]
-            post_rep = post_rep[keep]
+    for batch in range(batch_size):
+        batch_tensor = torch.tensor(batch, device=device, dtype=torch.long)
 
-        if batch_rep.numel() > 0:
-            batch_time = torch.stack((batch_rep, time_rep), dim=1)
-            states, extras = _build_states_and_extras(
-                padded_pre,
-                padded_post,
-                window,
-                weight_snapshot,
-                l_norm=l_norm,
-                event_type=_EVENT_TYPE_PRE,
-                batch_and_time=batch_time,
-                pre_idx=pre_rep,
-                post_idx=post_rep,
-                device=device,
-            )
-            _write_events(states, extras, pre_rep, post_rep, batch_rep)
+        pre_mask = pre_spikes[batch].to(torch.bool)
+        pre_idx_single, time_pre = pre_mask.nonzero(as_tuple=True)
+        if pre_idx_single.numel() > 0:
+            pre_rep = pre_idx_single.repeat_interleave(n_post)
+            post_rep = post_all.repeat(pre_idx_single.numel())
+            batch_rep = batch_tensor.expand(pre_rep.size(0))
+            time_rep = time_pre.repeat_interleave(n_post)
 
-    # Post-synaptic spikes paired with all pre-synaptic neurons (masked if provided).
-    batch_post, post_indices, time_post = _extract_events(post_spikes)
-    if batch_post.numel() > 0:
-        pre_all = torch.arange(n_pre, device=device)
-        repeat_factor = n_pre
-        batch_rep = batch_post.repeat_interleave(repeat_factor)
-        time_rep = time_post.repeat_interleave(repeat_factor)
-        pre_rep = pre_all.repeat(batch_post.size(0))
-        post_rep = post_indices.repeat_interleave(repeat_factor)
+            if valid_mask is not None:
+                keep = valid_mask[pre_rep, post_rep]
+                pre_rep = pre_rep[keep]
+                post_rep = post_rep[keep]
+                batch_rep = batch_rep[keep]
+                time_rep = time_rep[keep]
 
-        if valid_mask is not None:
-            keep = valid_mask[pre_rep, post_rep]
-            batch_rep = batch_rep[keep]
-            time_rep = time_rep[keep]
-            pre_rep = pre_rep[keep]
-            post_rep = post_rep[keep]
+            if pre_rep.numel() > 0:
+                batch_time = torch.stack((batch_rep, time_rep), dim=1)
+                states, extras = _build_states_and_extras(
+                    padded_pre,
+                    padded_post,
+                    window,
+                    weight_snapshot,
+                    l_norm=l_norm,
+                    event_type=_EVENT_TYPE_PRE,
+                    batch_and_time=batch_time,
+                    pre_idx=pre_rep,
+                    post_idx=post_rep,
+                    device=device,
+                )
+                _write_events(states, extras, pre_rep, post_rep, batch_rep)
 
-        if batch_rep.numel() > 0:
-            batch_time = torch.stack((batch_rep, time_rep), dim=1)
-            states, extras = _build_states_and_extras(
-                padded_pre,
-                padded_post,
-                window,
-                weight_snapshot,
-                l_norm=l_norm,
-                event_type=_EVENT_TYPE_POST,
-                batch_and_time=batch_time,
-                pre_idx=pre_rep,
-                post_idx=post_rep,
-                device=device,
-            )
-            _write_events(states, extras, pre_rep, post_rep, batch_rep)
+        post_mask = post_spikes[batch].to(torch.bool)
+        post_idx_single, time_post = post_mask.nonzero(as_tuple=True)
+        if post_idx_single.numel() > 0:
+            pre_rep = pre_all.repeat(post_idx_single.numel())
+            post_rep = post_idx_single.repeat_interleave(n_pre)
+            batch_rep = batch_tensor.expand(pre_rep.size(0))
+            time_rep = time_post.repeat_interleave(n_pre)
+
+            if valid_mask is not None:
+                keep = valid_mask[pre_rep, post_rep]
+                pre_rep = pre_rep[keep]
+                post_rep = post_rep[keep]
+                batch_rep = batch_rep[keep]
+                time_rep = time_rep[keep]
+
+            if post_rep.numel() > 0:
+                batch_time = torch.stack((batch_rep, time_rep), dim=1)
+                states, extras = _build_states_and_extras(
+                    padded_pre,
+                    padded_post,
+                    window,
+                    weight_snapshot,
+                    l_norm=l_norm,
+                    event_type=_EVENT_TYPE_POST,
+                    batch_and_time=batch_time,
+                    pre_idx=pre_rep,
+                    post_idx=post_rep,
+                    device=device,
+                )
+                _write_events(states, extras, pre_rep, post_rep, batch_rep)

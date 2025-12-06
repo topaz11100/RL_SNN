@@ -52,6 +52,7 @@ class GaussianPolicy(nn.Module):
             mean: mean action in [-1, 1]
         """
 
+        spike_history = spike_history.float()
         features = self.encoder(spike_history)
         if extra_features is not None:
             features = torch.cat([features, extra_features], dim=-1)
