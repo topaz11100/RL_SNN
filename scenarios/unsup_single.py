@@ -51,6 +51,7 @@ def _forward_in_event_batches(actor, critic, states, extras, batch_size):
         states_mb = states[start:end]
         extras_mb = extras[start:end] if extras_available else None
         action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
+        log_prob_mb = log_prob_mb.detach()
         value_mb = critic(states_mb, extras_mb)
         if actions_cat is None:
             actions_cat = action_mb
