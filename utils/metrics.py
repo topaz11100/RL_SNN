@@ -1,6 +1,9 @@
 import os
 from typing import Iterable, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

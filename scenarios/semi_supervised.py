@@ -125,7 +125,8 @@ def run_semi(args, logger):
 
     delta_t_values = []
     delta_d_values = []
-    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
+    estimated_events = args.batch_size_images * args.spike_array_len * (784 + args.N_hidden + 10)
+    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):

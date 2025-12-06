@@ -122,7 +122,8 @@ def run_unsup2(args, logger):
     _ensure_eval_file(metrics_val)
     _ensure_eval_file(metrics_test)
 
-    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
+    estimated_events = args.batch_size_images * args.spike_array_len * (784 + 2 * args.N_E)
+    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
     delta_t_exc = []
