@@ -30,6 +30,9 @@ def ppo_update(
             actions_mb = actions[batch_idx]
             log_probs_old_mb = log_probs_old[batch_idx]
             advantages_mb = advantages[batch_idx]
+            advantages_mb = (advantages_mb - advantages_mb.mean()) / (
+                advantages_mb.std() + 1e-8
+            )
             rewards_mb = rewards[batch_idx]
 
             extras_mb = extras[batch_idx] if extras.numel() > 0 else None
@@ -86,6 +89,9 @@ def ppo_update_events(
             actions_mb = actions_old[batch_idx]
             log_probs_old_mb = log_probs_old[batch_idx]
             advantages_mb = advantages[batch_idx]
+            advantages_mb = (advantages_mb - advantages_mb.mean()) / (
+                advantages_mb.std() + 1e-8
+            )
             returns_mb = returns[batch_idx]
 
             extras_mb = extras[batch_idx] if extras_available else None

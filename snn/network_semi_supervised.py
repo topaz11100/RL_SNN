@@ -26,9 +26,10 @@ def _semi_supervised_forward_script(
     hidden_hist: Tuple[Tensor, ...] = ()
     output_hist: Tuple[Tensor, ...] = ()
 
+    I_hidden_all = torch.matmul(input_spikes.permute(0, 2, 1), torch.relu(w_input_hidden))
+
     for t in range(T):
-        x_t = input_spikes[:, :, t]
-        I_hidden = torch.matmul(x_t, torch.relu(w_input_hidden))
+        I_hidden = I_hidden_all[:, t, :]
         v_hidden, s_hidden = lif_step_script(v_hidden, I_hidden, hidden_params)
 
         I_output = torch.matmul(s_hidden_prev, torch.relu(w_hidden_output))
