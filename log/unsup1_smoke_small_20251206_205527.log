@@ -1,0 +1,48 @@
+2025-12-06 20:55:29,163 - INFO - Args: {'scenario': 'unsup1', 'seed': 0, 'batch_size_images': 8, 'event_batch_size': 2048, 'run_name': 'smoke_small_20251206_205527_unsup1', 'log_interval': 1, 'num_epochs': 1, 'T_unsup1': 50, 'T_unsup2': 50, 'T_semi': 50, 'T_sup': 50, 'spike_array_len': 10, 'sigma_unsup1': 0.1, 'sigma_unsup2': 0.1, 'sigma_semi': 0.1, 'sigma_sup': 0.1, 'N_E': 32, 'N_hidden': 64, 'dt': 1.0, 'layer_index_scale': 1.0, 'lr_actor': 0.001, 'lr_critic': 0.001, 'ppo_eps': 0.2, 'ppo_epochs': 2, 'ppo_batch_size': 512, 'exc_clip_min': 0.0, 'exc_clip_max': 1.0, 'inh_clip_min': 0.0, 'inh_clip_max': 1.0, 'local_lr': 0.01, 'rho_target': 0.1, 'alpha_sparse': 1.0, 'alpha_div': 0.1, 'alpha_stab': 0.1, 'beta_margin': 0.5, 'alpha_align': 0.1, 'max_rate': 0.1, 'log_gradient_stats': False, 'result_dir': 'results/unsup1/smoke_small_20251206_205527_unsup1'}
+2025-12-06 20:55:29,163 - INFO - Starting scenario: unsup1
+2025-12-06 20:55:29,163 - INFO - Results will be saved to: results/unsup1/smoke_small_20251206_205527_unsup1
+2025-12-06 20:55:31,251 - INFO - Epoch 1/1 | Batch 1/6750
+2025-12-06 20:55:32,704 - INFO - Epoch 1/1 | Batch 2/6750
+2025-12-06 20:55:34,061 - INFO - Epoch 1/1 | Batch 3/6750
+2025-12-06 20:55:35,383 - INFO - Epoch 1/1 | Batch 4/6750
+2025-12-06 20:55:36,644 - INFO - Epoch 1/1 | Batch 5/6750
+2025-12-06 20:55:37,889 - INFO - Epoch 1/1 | Batch 6/6750
+2025-12-06 20:55:38,940 - INFO - Epoch 1/1 | Batch 7/6750
+2025-12-06 20:55:40,292 - INFO - Epoch 1/1 | Batch 8/6750
+2025-12-06 20:55:41,435 - INFO - Epoch 1/1 | Batch 9/6750
+2025-12-06 20:55:42,466 - INFO - Epoch 1/1 | Batch 10/6750
+2025-12-06 20:55:43,846 - INFO - Epoch 1/1 | Batch 11/6750
+2025-12-06 20:55:45,127 - INFO - Epoch 1/1 | Batch 12/6750
+2025-12-06 20:55:46,740 - INFO - Epoch 1/1 | Batch 13/6750
+2025-12-06 20:55:48,187 - INFO - Epoch 1/1 | Batch 14/6750
+2025-12-06 20:55:49,890 - INFO - Epoch 1/1 | Batch 15/6750
+2025-12-06 20:55:51,409 - INFO - Epoch 1/1 | Batch 16/6750
+Traceback (most recent call last):
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/main.py", line 39, in <module>
+    main()
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/main.py", line 35, in main
+    runner(args, logger)
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/scenarios/unsup_single.py", line 307, in run_unsup1
+    ppo_update_events(
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/rl/ppo.py", line 118, in ppo_update_events
+    values_new = critic(states_mb, extras_mb)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/rl/value.py", line 37, in forward
+    features = self.encoder(spike_history)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/rl/value.py", line 18, in forward
+    return x.mean(dim=2)
+           ^^^^^^^^^^^^^
+KeyboardInterrupt

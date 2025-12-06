@@ -48,9 +48,9 @@ run_one() {
 # 필요하면 이 스크립트 자체를 nohup으로 돌리면 됨:
 #   nohup ./run_smoke_all_seq.sh &
 
-run_one "unsup1" ""
-run_one "unsup2" ""
-run_one "semi"   ""
 run_one "grad"   "--log-gradient-stats"
+run_one "semi"   ""
+run_one "unsup2" ""
+run_one "unsup1" ""
 
 echo "All scenarios finished."
