@@ -96,6 +96,113 @@ def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
     return last_pre - last_post
 
 
+def analyze_stdp_profile(
+    network: DiehlCookNetwork,
+    actor_exc: GaussianPolicy,
+    actor_inh: GaussianPolicy,
+    critic_exc: ValueFunction,
+    critic_inh: ValueFunction,
+    loader,
+    args,
+    device: torch.device,
+) -> None:
+    network_state = network.training
+    actor_exc_state = actor_exc.training
+    actor_inh_state = actor_inh.training
+    critic_exc_state = critic_exc.training
+    critic_inh_state = critic_inh.training
+    network.eval()
+    actor_exc.eval()
+    actor_inh.eval()
+    critic_exc.eval()
+    critic_inh.eval()
+
+    try:
+        images, _, _ = next(iter(loader))
+    except StopIteration:
+        return
+
+    estimated_events = args.batch_size_images * args.spike_array_len * (784 + 2 * args.N_E)
+    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+
+    def _plot(delta_t: torch.Tensor, delta_d: torch.Tensor, suffix: str) -> None:
+        if delta_t.numel() > 0 and delta_d.numel() > 0:
+            plot_delta_t_delta_d(delta_t.cpu(), delta_d.cpu(), os.path.join(args.result_dir, suffix))
+
+    with torch.no_grad():
+        images = images.to(device, non_blocking=True)
+        input_spikes = poisson_encode(images, args.T_unsup2, max_rate=args.max_rate)
+        exc_spikes, inh_spikes = network(input_spikes)
+
+        event_buffer.reset()
+        padded_cache = {}
+
+        def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+            key = id(spikes)
+            if key not in padded_cache:
+                padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+            return padded_cache[key]
+
+        gather_events(
+            input_spikes,
+            exc_spikes,
+            network.w_input_exc,
+            args.spike_array_len,
+            event_buffer,
+            0,
+            padded_pre=_get_padded(input_spikes),
+            padded_post=_get_padded(exc_spikes),
+        )
+        gather_events(
+            inh_spikes,
+            exc_spikes,
+            network.w_inh_exc,
+            args.spike_array_len,
+            event_buffer,
+            1,
+            valid_mask=network.inh_exc_mask,
+            padded_pre=_get_padded(inh_spikes),
+            padded_post=_get_padded(exc_spikes),
+        )
+
+        if len(event_buffer) > 0:
+            states, extras, connection_ids, _, _, _ = event_buffer.flatten()
+
+            exc_mask = connection_ids == 0
+            inh_mask = connection_ids == 1
+
+            if exc_mask.any():
+                actions_exc, _, _ = _forward_in_event_batches(
+                    actor_exc,
+                    critic_exc,
+                    states[exc_mask],
+                    extras[exc_mask],
+                    batch_size=args.event_batch_size,
+                )
+                _plot(_extract_delta_t(states[exc_mask]), actions_exc.detach(), "delta_t_delta_d_exc.png")
+
+            if inh_mask.any():
+                actions_inh, _, _ = _forward_in_event_batches(
+                    actor_inh,
+                    critic_inh,
+                    states[inh_mask],
+                    extras[inh_mask],
+                    batch_size=args.event_batch_size,
+                )
+                _plot(_extract_delta_t(states[inh_mask]), actions_inh.detach(), "delta_t_delta_d_inh.png")
+
+    if network_state:
+        network.train()
+    if actor_exc_state:
+        actor_exc.train()
+    if actor_inh_state:
+        actor_inh.train()
+    if critic_exc_state:
+        critic_exc.train()
+    if critic_inh_state:
+        critic_inh.train()
+
+
 def run_unsup2(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
@@ -131,10 +238,6 @@ def run_unsup2(args, logger):
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
-    delta_t_exc = torch.empty(0, device=device)
-    delta_d_exc = torch.empty(0, device=device)
-    delta_t_inh = torch.empty(0, device=device)
-    delta_d_inh = torch.empty(0, device=device)
     for epoch in range(1, args.num_epochs + 1):
         total_sparse = torch.zeros((), device=device)
         total_div = torch.zeros((), device=device)
@@ -262,8 +365,6 @@ def run_unsup2(args, logger):
                         delta_exc = args.local_lr * s_scen * actions_exc.detach()
                         _scatter_updates(delta_exc, pre_exc_events, post_exc_events, network.w_input_exc)
                         network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
-                    delta_t_exc = torch.cat((delta_t_exc, _extract_delta_t(states_exc)), dim=0)
-                    delta_d_exc = torch.cat((delta_d_exc, actions_exc.detach()), dim=0)
 
                 # Inhibitory pathway
                 inh_mask = connection_ids == 1
@@ -310,8 +411,6 @@ def run_unsup2(args, logger):
                             valid_mask=network.inh_exc_mask,
                         )
                         network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
-                    delta_t_inh = torch.cat((delta_t_inh, _extract_delta_t(states_inh)), dim=0)
-                    delta_d_inh = torch.cat((delta_d_inh, actions_inh.detach()), dim=0)
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -357,23 +456,13 @@ def run_unsup2(args, logger):
                 test_acc,
             )
 
-    delta_t_exc_concat = delta_t_exc.cpu()
-    delta_d_exc_concat = delta_d_exc.cpu()
-    if delta_t_exc_concat.numel() > 0 and delta_d_exc_concat.numel() > 0:
-        plot_delta_t_delta_d(
-            delta_t_exc_concat, delta_d_exc_concat, os.path.join(args.result_dir, "delta_t_delta_d_exc.png")
-        )
-
-    delta_t_inh_concat = delta_t_inh.cpu()
-    delta_d_inh_concat = delta_d_inh.cpu()
-    if delta_t_inh_concat.numel() > 0 and delta_d_inh_concat.numel() > 0:
-        plot_delta_t_delta_d(
-            delta_t_inh_concat, delta_d_inh_concat, os.path.join(args.result_dir, "delta_t_delta_d_inh.png")
-        )
-
     plot_weight_histograms(
         w_input_exc_before, network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "hist_input_exc.png")
     )
     plot_weight_histograms(
         w_inh_exc_before, network.w_inh_exc.detach().cpu(), os.path.join(args.result_dir, "hist_inh_exc.png")
+    )
+
+    analyze_stdp_profile(
+        network, actor_exc, actor_inh, critic_exc, critic_inh, train_loader, args, device
     )
