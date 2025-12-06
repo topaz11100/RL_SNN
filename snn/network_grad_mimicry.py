@@ -9,7 +9,7 @@ from snn.lif import LIFParams, lif_dynamics_script
 @torch.jit.script
 def _grad_mimicry_forward_script(
     input_spikes: Tensor,
-    w_layers: Tuple[Tensor, ...],
+    w_layers: List[Tensor],
     hidden_sizes: List[int],
     hidden_params: LIFParams,
     output_params: LIFParams,
@@ -21,10 +21,12 @@ def _grad_mimicry_forward_script(
 
     n_hidden_layers = len(hidden_sizes)
 
-    v_states: Tuple[Tensor, ...] = tuple(
+    v_states: List[Tensor] = [
         torch.full((batch_size, h), hidden_params.v_rest, device=device, dtype=dtype) for h in hidden_sizes
-    )
-    s_prev: Tuple[Tensor, ...] = tuple(torch.zeros((batch_size, h), device=device, dtype=dtype) for h in hidden_sizes)
+    ]
+    s_prev: List[Tensor] = [
+        torch.zeros((batch_size, h), device=device, dtype=dtype) for h in hidden_sizes
+    ]
     v_output = torch.full((batch_size, w_layers[-1].size(1)), output_params.v_rest, device=device, dtype=dtype)
 
     if T == 0:
@@ -33,9 +35,9 @@ def _grad_mimicry_forward_script(
         firing_rates = torch.zeros((batch_size, w_layers[-1].size(1)), device=device, dtype=dtype)
         return empty_hidden, empty_output, firing_rates
 
-    hidden_spikes_tensor: Tuple[Tensor, ...] = tuple(
+    hidden_spikes_tensor: List[Tensor] = [
         torch.empty((batch_size, h, T), device=device, dtype=dtype) for h in hidden_sizes
-    )
+    ]
     output_spikes = torch.empty((batch_size, w_layers[-1].size(1), T), device=device, dtype=dtype)
 
     relu_w0 = torch.relu(w_layers[0])
@@ -58,16 +60,20 @@ def _grad_mimicry_forward_script(
             v_states[0], current_first, hidden_params, True, surrogate_slope
         )
 
-        new_v_states = (v_first_next,)
-        new_spikes = (s_first,)
+        s_current: List[Tensor] = []
+
+        v_states[0] = v_first_next
+        s_current.append(s_first)
+        hidden_spikes_tensor[0][:, :, t] = s_first
 
         for li in range(1, n_hidden_layers):
             current_hidden = torch.matmul(s_prev[li - 1], torch.relu(w_layers[li]))
             v_next, s_next = lif_dynamics_script(
                 v_states[li], current_hidden, hidden_params, True, surrogate_slope
             )
-            new_v_states = new_v_states + (v_next,)
-            new_spikes = new_spikes + (s_next,)
+            v_states[li] = v_next
+            s_current.append(s_next)
+            hidden_spikes_tensor[li][:, :, t] = s_next
 
         prev_spikes_for_output = s_prev[-1]
         current_out = torch.matmul(prev_spikes_for_output, torch.relu(w_layers[-1]))
@@ -75,14 +81,11 @@ def _grad_mimicry_forward_script(
             v_output, current_out, output_params, True, surrogate_slope
         )
 
-        for li, spike in enumerate(new_spikes):
-            hidden_spikes_tensor[li][:, :, t] = spike
         output_spikes[:, :, t] = s_output
 
-        v_states = new_v_states
-        s_prev = new_spikes
+        s_prev = s_current
 
-    hidden_spikes = [tensor for tensor in hidden_spikes_tensor]
+    hidden_spikes = hidden_spikes_tensor
     firing_rates = output_spikes.mean(dim=2)
     return hidden_spikes, output_spikes, firing_rates
 
@@ -126,7 +129,7 @@ class GradMimicryNetwork(nn.Module):
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
         return _grad_mimicry_forward_script(
             input_spikes,
-            tuple(self.w_layers),
+            list(self.w_layers),
             self.hidden_sizes,
             self.hidden_params,
             self.output_params,
