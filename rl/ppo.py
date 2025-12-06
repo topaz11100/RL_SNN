@@ -18,7 +18,9 @@ def ppo_update(
 ):
     states, extras, actions, log_probs_old, values_old, rewards = buffer.get_batch()
     advantages = (rewards - values_old).detach()
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    adv_mean = advantages.mean()
+    adv_std = advantages.std()
+    advantages = (advantages - adv_mean) / (adv_std + 1e-8)
     num_samples = states.size(0)
 
     for _ in range(ppo_epochs):
@@ -79,7 +81,9 @@ def ppo_update_events(
         return
     extras_available = extras.numel() > 0
 
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    adv_mean = advantages.mean()
+    adv_std = advantages.std()
+    advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
     for _ in range(ppo_epochs):
         indices = torch.randperm(num_samples, device=states.device)
