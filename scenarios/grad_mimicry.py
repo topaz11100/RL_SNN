@@ -223,12 +223,8 @@ def run_grad(args, logger):
     _ensure_metrics_file(metrics_val, "epoch\tacc\treward\talign")
     _ensure_metrics_file(metrics_test, "epoch\tacc\treward\talign")
 
-    agent_deltas_log = [
-        torch.empty((0, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
-    ]
-    teacher_deltas_log = [
-        torch.empty((0, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
-    ]
+    agent_deltas_log: list[list[torch.Tensor]] = [[] for _ in network.w_layers]
+    teacher_deltas_log: list[list[torch.Tensor]] = [[] for _ in network.w_layers]
     weights_before = [w.detach().cpu().clone() for w in network.w_layers]
     total_synapses = sum(w.numel() for w in network.w_layers)
 
@@ -333,7 +329,8 @@ def run_grad(args, logger):
                     if li > 0:
                         w_relu = torch.relu(network.w_layers[li])
                         grad_next = grad_next @ w_relu.t()
-                        grad_next = grad_next * (pre_activations[li - 1] > 0).to(grad_next.dtype)
+                        activation_mask = (pre_activations[li] > 0).to(grad_next.dtype)
+                        grad_next = grad_next * activation_mask
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
@@ -385,12 +382,8 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log[li] = torch.cat(
-                        (agent_deltas_log[li], agent_deltas[li].sum(dim=0, keepdim=True)), dim=0
-                    )
-                    teacher_deltas_log[li] = torch.cat(
-                        (teacher_deltas_log[li], teacher_deltas[li].sum(dim=0, keepdim=True)), dim=0
-                    )
+                    agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
+                    teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach().cpu())
 
                 total_reward = total_reward + rewards.sum()
                 total_align = total_align + rewards.sum()
@@ -438,8 +431,11 @@ def run_grad(args, logger):
         )
 
     if agent_deltas_log and teacher_deltas_log:
-        agent_cat = torch.cat(agent_deltas_log).cpu()
-        teacher_cat = torch.cat(teacher_deltas_log).cpu()
-        plot_grad_alignment(agent_cat, teacher_cat, os.path.join(args.result_dir, "grad_alignment.png"))
+        agent_tensors = [torch.stack(log) for log in agent_deltas_log if log]
+        teacher_tensors = [torch.stack(log) for log in teacher_deltas_log if log]
+        if agent_tensors and teacher_tensors:
+            agent_cat = torch.cat(agent_tensors)
+            teacher_cat = torch.cat(teacher_tensors)
+            plot_grad_alignment(agent_cat, teacher_cat, os.path.join(args.result_dir, "grad_alignment.png"))
 
     analyze_stdp_profile(network, actor, critic, train_loader, args, device)
