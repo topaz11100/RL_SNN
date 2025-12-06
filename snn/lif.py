@@ -23,44 +23,37 @@ class LIFParams(object):
         self.R = R
 
 
+# ==========================================
+# Part A: JIT-Compatible LIF (For Unsup/Semi)
+# ==========================================
+
 def lif_dynamics(
     v: Tensor,
     I: Tensor,
     params: LIFParams,
-    surrogate: bool = False,
-    slope: float = 5.0,
 ) -> Tuple[Tensor, Tensor]:
-    """공통 LIF 동역학 (Theory 2.2)."""
+    """Hard spike LIF dynamics for JIT execution."""
     if v.shape != I.shape:
         raise ValueError(f"v and I must have the same shape, got {v.shape} and {I.shape}")
 
     dt_over_tau = params.dt / params.tau
-
     dv = (-(v - params.v_rest) + params.R * I) * dt_over_tau
     v_next = v + dv
 
-    if surrogate:
-        spikes = torch.sigmoid(slope * (v_next - params.v_th))
-    else:
-        spikes = (v_next >= params.v_th).to(v_next.dtype)
+    spikes = (v_next >= params.v_th).to(v_next.dtype)
 
-    spikes_detached = spikes.detach()
     v_reset = torch.full_like(v_next, params.v_reset)
-    # Hard reset to v_reset when a spike occurs (Theory.md §2.2 hard reset rule).
-    # .bool() -> .to(torch.bool)로 변경하여 JIT 호환성 확보
-    v_after_reset = torch.where(spikes_detached.to(torch.bool), v_reset, v_next)
+    v_after_reset = torch.where(spikes.to(torch.bool), v_reset, v_next)
 
     return v_after_reset, spikes
 
 
-# Optimized: Provide both non-JIT and scripted variants to avoid vmap/JIT conflicts while
-# still enabling scripted kernels where safe.
 lif_dynamics_script = torch.jit.script(lif_dynamics)
 
 
 def lif_step(v: Tensor, I_syn: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
     """Single LIF update step (Theory 2.2 hard Heaviside)."""
-    return lif_dynamics(v, I_syn, params, surrogate=False)
+    return lif_dynamics(v, I_syn, params)
 
 
 lif_step_script = torch.jit.script(lif_step)
@@ -90,14 +83,53 @@ def lif_forward(I: Tensor, params: LIFParams) -> Tuple[Tensor, Tensor]:
 
 
 class LIFCell(nn.Module):
-    """LIF 동역학을 수행하는 단일 스텝 셀 (Theory 2.2)."""
+    """JIT-compatible LIF Cell."""
 
-    def __init__(self, params: LIFParams, surrogate: bool = False, slope: float = 5.0):
+    def __init__(self, params: LIFParams):
         super().__init__()
         self.params = params
-        self.surrogate = surrogate
-        self.slope = slope
 
     @torch.jit.export
     def forward(self, v: Tensor, I: Tensor) -> Tuple[Tensor, Tensor]:
-        return lif_dynamics(v, I, self.params, surrogate=self.surrogate, slope=self.slope)
+        return lif_dynamics(v, I, self.params)
+
+
+# ==========================================
+# Part B: Autograd-Compatible LIF (For Supervised BPTT)
+# ==========================================
+
+class SurrogateSpike(torch.autograd.Function):
+    """Standard surrogate gradient spike function."""
+
+    @staticmethod
+    def forward(ctx, input: Tensor, slope: float = 25.0) -> Tensor:  # type: ignore[override]
+        ctx.save_for_backward(input)
+        ctx.slope = slope
+        return (input > 0).float()
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):  # type: ignore[override]
+        input, = ctx.saved_tensors
+        slope = ctx.slope
+        sigmoid_val = torch.sigmoid(slope * input)
+        grad_input = grad_output * sigmoid_val * (1 - sigmoid_val) * slope
+        return grad_input, None
+
+
+def lif_dynamics_bptt(
+    v: Tensor,
+    I: Tensor,
+    params: LIFParams,
+    slope: float = 25.0,
+) -> Tuple[Tensor, Tensor]:
+    """LIF dynamics with surrogate gradient for supervised BPTT (no JIT)."""
+    dt_over_tau = params.dt / params.tau
+    dv = (-(v - params.v_rest) + params.R * I) * dt_over_tau
+    v_next = v + dv
+
+    spikes = SurrogateSpike.apply(v_next - params.v_th, slope)
+
+    v_reset = torch.full_like(v_next, params.v_reset)
+    v_after_reset = torch.where(spikes.to(torch.bool), v_reset, v_next)
+
+    return v_after_reset, spikes
