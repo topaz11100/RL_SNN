@@ -22,20 +22,26 @@ def ppo_update(
 
     for _ in range(ppo_epochs):
         indices = torch.randperm(num_samples, device=states.device)
+        states_shuffled = states.index_select(0, indices)
+        actions_shuffled = actions.index_select(0, indices)
+        log_probs_shuffled = log_probs_old.index_select(0, indices)
+        advantages_shuffled = advantages.index_select(0, indices)
+        rewards_shuffled = rewards.index_select(0, indices)
+        extras_shuffled = extras.index_select(0, indices) if extras.numel() > 0 else extras
+
         for start in range(0, num_samples, batch_size):
             end = start + batch_size
-            batch_idx = indices[start:end]
 
-            states_mb = states[batch_idx]
-            actions_mb = actions[batch_idx]
-            log_probs_old_mb = log_probs_old[batch_idx]
-            advantages_mb = advantages[batch_idx]
+            states_mb = states_shuffled[start:end]
+            actions_mb = actions_shuffled[start:end]
+            log_probs_old_mb = log_probs_shuffled[start:end]
+            advantages_mb = advantages_shuffled[start:end]
             advantages_mb = (advantages_mb - advantages_mb.mean()) / (
                 advantages_mb.std() + 1e-8
             )
-            rewards_mb = rewards[batch_idx]
+            rewards_mb = rewards_shuffled[start:end]
 
-            extras_mb = extras[batch_idx] if extras.numel() > 0 else None
+            extras_mb = extras_shuffled[start:end] if extras.numel() > 0 else None
 
             _, log_probs_new, _ = actor(states_mb, extras_mb, actions=actions_mb)
             ratio = torch.exp(log_probs_new - log_probs_old_mb)
@@ -81,20 +87,26 @@ def ppo_update_events(
 
     for _ in range(ppo_epochs):
         indices = torch.randperm(num_samples, device=states.device)
+        states_shuffled = states.index_select(0, indices)
+        actions_shuffled = actions_old.index_select(0, indices)
+        log_probs_shuffled = log_probs_old.index_select(0, indices)
+        advantages_shuffled = advantages.index_select(0, indices)
+        returns_shuffled = returns.index_select(0, indices)
+        extras_shuffled = extras.index_select(0, indices) if extras_available else extras
+
         for start in range(0, num_samples, batch_size):
             end = start + batch_size
-            batch_idx = indices[start:end]
 
-            states_mb = states[batch_idx]
-            actions_mb = actions_old[batch_idx]
-            log_probs_old_mb = log_probs_old[batch_idx]
-            advantages_mb = advantages[batch_idx]
+            states_mb = states_shuffled[start:end]
+            actions_mb = actions_shuffled[start:end]
+            log_probs_old_mb = log_probs_shuffled[start:end]
+            advantages_mb = advantages_shuffled[start:end]
             advantages_mb = (advantages_mb - advantages_mb.mean()) / (
                 advantages_mb.std() + 1e-8
             )
-            returns_mb = returns[batch_idx]
+            returns_mb = returns_shuffled[start:end]
 
-            extras_mb = extras[batch_idx] if extras_available else None
+            extras_mb = extras_shuffled[start:end] if extras_available else None
 
             _, log_probs_new, _ = actor(states_mb, extras_mb, actions=actions_mb)
             ratio = torch.exp(log_probs_new - log_probs_old_mb)
