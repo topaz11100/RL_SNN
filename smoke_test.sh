@@ -39,9 +39,9 @@ run_one() {
 #   nohup ./run_smoke_all_seq.sh &
 
 
-run_one "unsup2" ""
 run_one "semi" ""
 run_one "grad" "--log-gradient-stats"
 run_one "unsup1" ""
+run_one "unsup2" ""
 
 echo "All scenarios finished."
