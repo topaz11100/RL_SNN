@@ -38,10 +38,12 @@ def _grad_mimicry_forward_script(
     )
     output_spikes = torch.empty((batch_size, w_layers[-1].size(1), T), device=device, dtype=dtype)
 
+    relu_w0 = torch.relu(w_layers[0])
+    current_input_all = torch.matmul(input_spikes.permute(0, 2, 1), relu_w0)
+
     if n_hidden_layers == 0:
         for t in range(T):
-            x_t = input_spikes[:, :, t]
-            current_out = torch.matmul(x_t, torch.relu(w_layers[0]))
+            current_out = current_input_all[:, t, :]
             v_output, s_output = lif_dynamics_script(
                 v_output, current_out, output_params, True, surrogate_slope
             )
@@ -51,9 +53,7 @@ def _grad_mimicry_forward_script(
         return [], output_spikes, firing_rates
 
     for t in range(T):
-        x_t = input_spikes[:, :, t]
-
-        current_first = torch.matmul(x_t, torch.relu(w_layers[0]))
+        current_first = current_input_all[:, t, :]
         v_first_next, s_first = lif_dynamics_script(
             v_states[0], current_first, hidden_params, True, surrogate_slope
         )

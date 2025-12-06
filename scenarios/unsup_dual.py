@@ -38,7 +38,7 @@ def _compute_sparse_reward(exc_spikes: torch.Tensor, rho_target: float) -> Tuple
 
 
 def _forward_in_event_batches(actor, critic, states, extras, batch_size):
-    actions, log_probs, values = [], [], []
+    actions_cat, log_probs_cat, values_cat = None, None, None
     extras_available = extras.numel() > 0
     for start in range(0, states.size(0), batch_size):
         end = start + batch_size
@@ -46,10 +46,15 @@ def _forward_in_event_batches(actor, critic, states, extras, batch_size):
         extras_mb = extras[start:end] if extras_available else None
         action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
         value_mb = critic(states_mb, extras_mb)
-        actions.append(action_mb)
-        log_probs.append(log_prob_mb)
-        values.append(value_mb)
-    return torch.cat(actions, dim=0), torch.cat(log_probs, dim=0), torch.cat(values, dim=0)
+        if actions_cat is None:
+            actions_cat = action_mb
+            log_probs_cat = log_prob_mb
+            values_cat = value_mb
+        else:
+            actions_cat = torch.cat((actions_cat, action_mb), dim=0)
+            log_probs_cat = torch.cat((log_probs_cat, log_prob_mb), dim=0)
+            values_cat = torch.cat((values_cat, value_mb), dim=0)
+    return actions_cat, log_probs_cat, values_cat
 
 
 def _scatter_updates(
@@ -126,12 +131,16 @@ def run_unsup2(args, logger):
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
-    delta_t_exc = []
-    delta_d_exc = []
-    delta_t_inh = []
-    delta_d_inh = []
+    delta_t_exc = torch.empty(0, device=device)
+    delta_d_exc = torch.empty(0, device=device)
+    delta_t_inh = torch.empty(0, device=device)
+    delta_d_inh = torch.empty(0, device=device)
     for epoch in range(1, args.num_epochs + 1):
-        epoch_sparse, epoch_div, epoch_stab, epoch_total = [], [], [], []
+        total_sparse = torch.zeros((), device=device)
+        total_div = torch.zeros((), device=device)
+        total_stab = torch.zeros((), device=device)
+        total_reward_sum = torch.zeros((), device=device)
+        total_samples = torch.zeros((), device=device)
         for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             indices = indices.to(device, non_blocking=True)
@@ -199,10 +208,13 @@ def run_unsup2(args, logger):
                 padded_post=_get_padded(exc_spikes),
             )
 
-            epoch_sparse.append(r_sparse.detach())
-            epoch_div.append(r_div.detach())
-            epoch_stab.append(r_stab.detach())
-            epoch_total.append(total_reward.detach())
+            batch_size = winners.numel()
+            sample_increment = torch.tensor(batch_size, device=device, dtype=torch.float32)
+            total_samples = total_samples + sample_increment
+            total_sparse = total_sparse + r_sparse.sum()
+            total_div = total_div + r_div.sum()
+            total_stab = total_stab + r_stab.sum()
+            total_reward_sum = total_reward_sum + total_reward.sum()
 
             if len(event_buffer) > 0:
                 states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
@@ -250,8 +262,8 @@ def run_unsup2(args, logger):
                         delta_exc = args.local_lr * s_scen * actions_exc.detach()
                         _scatter_updates(delta_exc, pre_exc_events, post_exc_events, network.w_input_exc)
                         network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
-                    delta_t_exc.append(_extract_delta_t(states_exc).detach())
-                    delta_d_exc.append(actions_exc.detach())
+                    delta_t_exc = torch.cat((delta_t_exc, _extract_delta_t(states_exc)), dim=0)
+                    delta_d_exc = torch.cat((delta_d_exc, actions_exc.detach()), dim=0)
 
                 # Inhibitory pathway
                 inh_mask = connection_ids == 1
@@ -298,8 +310,8 @@ def run_unsup2(args, logger):
                             valid_mask=network.inh_exc_mask,
                         )
                         network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
-                    delta_t_inh.append(_extract_delta_t(states_inh).detach())
-                    delta_d_inh.append(actions_inh.detach())
+                    delta_t_inh = torch.cat((delta_t_inh, _extract_delta_t(states_inh)), dim=0)
+                    delta_d_inh = torch.cat((delta_d_inh, actions_inh.detach()), dim=0)
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
@@ -310,14 +322,10 @@ def run_unsup2(args, logger):
                     len(train_loader),
                 )
 
-        sparse_tensor = torch.cat(epoch_sparse) if epoch_sparse else torch.empty(0, device=device)
-        div_tensor = torch.cat(epoch_div) if epoch_div else torch.empty(0, device=device)
-        stab_tensor = torch.cat(epoch_stab) if epoch_stab else torch.empty(0, device=device)
-        total_tensor = torch.cat(epoch_total) if epoch_total else torch.empty(0, device=device)
-        mean_sparse = sparse_tensor.mean().item() if sparse_tensor.numel() > 0 else 0.0
-        mean_div = div_tensor.mean().item() if div_tensor.numel() > 0 else 0.0
-        mean_stab = stab_tensor.mean().item() if stab_tensor.numel() > 0 else 0.0
-        mean_total = total_tensor.mean().item() if total_tensor.numel() > 0 else 0.0
+        mean_sparse = (total_sparse / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_div = (total_div / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_stab = (total_stab / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_total = (total_reward_sum / total_samples).item() if total_samples.item() > 0 else 0.0
 
         with open(metrics_path, "a") as f:
             f.write(f"{epoch}\t{mean_sparse:.6f}\t{mean_div:.6f}\t{mean_stab:.6f}\t{mean_total:.6f}\n")
@@ -349,15 +357,15 @@ def run_unsup2(args, logger):
                 test_acc,
             )
 
-    delta_t_exc_concat = torch.cat(delta_t_exc, dim=0).cpu() if delta_t_exc else torch.empty(0)
-    delta_d_exc_concat = torch.cat(delta_d_exc, dim=0).cpu() if delta_d_exc else torch.empty(0)
+    delta_t_exc_concat = delta_t_exc.cpu()
+    delta_d_exc_concat = delta_d_exc.cpu()
     if delta_t_exc_concat.numel() > 0 and delta_d_exc_concat.numel() > 0:
         plot_delta_t_delta_d(
             delta_t_exc_concat, delta_d_exc_concat, os.path.join(args.result_dir, "delta_t_delta_d_exc.png")
         )
 
-    delta_t_inh_concat = torch.cat(delta_t_inh, dim=0).cpu() if delta_t_inh else torch.empty(0)
-    delta_d_inh_concat = torch.cat(delta_d_inh, dim=0).cpu() if delta_d_inh else torch.empty(0)
+    delta_t_inh_concat = delta_t_inh.cpu()
+    delta_d_inh_concat = delta_d_inh.cpu()
     if delta_t_inh_concat.numel() > 0 and delta_d_inh_concat.numel() > 0:
         plot_delta_t_delta_d(
             delta_t_inh_concat, delta_d_inh_concat, os.path.join(args.result_dir, "delta_t_delta_d_inh.png")

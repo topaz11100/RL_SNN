@@ -78,7 +78,7 @@ def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
 
 
 def _forward_in_event_batches(actor, critic, states, extras, batch_size):
-    actions, log_probs, values = [], [], []
+    actions_cat, log_probs_cat, values_cat = None, None, None
     extras_available = extras.numel() > 0
     for start in range(0, states.size(0), batch_size):
         end = start + batch_size
@@ -86,10 +86,15 @@ def _forward_in_event_batches(actor, critic, states, extras, batch_size):
         extras_mb = extras[start:end] if extras_available else None
         action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
         value_mb = critic(states_mb, extras_mb)
-        actions.append(action_mb)
-        log_probs.append(log_prob_mb)
-        values.append(value_mb)
-    return torch.cat(actions, dim=0), torch.cat(log_probs, dim=0), torch.cat(values, dim=0)
+        if actions_cat is None:
+            actions_cat = action_mb
+            log_probs_cat = log_prob_mb
+            values_cat = value_mb
+        else:
+            actions_cat = torch.cat((actions_cat, action_mb), dim=0)
+            log_probs_cat = torch.cat((log_probs_cat, log_prob_mb), dim=0)
+            values_cat = torch.cat((values_cat, value_mb), dim=0)
+    return actions_cat, log_probs_cat, values_cat
 
 
 def run_grad(args, logger):
@@ -116,17 +121,26 @@ def run_grad(args, logger):
     _ensure_metrics_file(metrics_val, "epoch\tacc\treward\talign")
     _ensure_metrics_file(metrics_test, "epoch\tacc\treward\talign")
 
-    agent_deltas_log = []
-    teacher_deltas_log = []
-    delta_t_values = []
-    delta_d_values = []
+    agent_deltas_log = [
+        torch.empty((0, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
+    ]
+    teacher_deltas_log = [
+        torch.empty((0, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
+    ]
+    delta_t_values = torch.empty(0, device=device)
+    delta_d_values = torch.empty(0, device=device)
 
     weights_before = [w.detach().cpu().clone() for w in network.w_layers]
     total_synapses = sum(w.numel() for w in network.w_layers)
 
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
-        epoch_acc, epoch_reward, epoch_align, epoch_active_ratio = [], [], [], []
+        total_correct = torch.zeros((), device=device)
+        total_reward = torch.zeros((), device=device)
+        total_align = torch.zeros((), device=device)
+        total_active = torch.zeros((), device=device)
+        total_samples = torch.zeros((), device=device)
+        active_batches = torch.zeros((), device=device)
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -135,8 +149,10 @@ def run_grad(args, logger):
             hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
 
             preds = firing_rates.argmax(dim=1)
-            batch_acc_tensor = (preds == labels).float().mean()
-            epoch_acc.append(batch_acc_tensor.detach())
+            batch_size = labels.numel()
+            sample_increment = torch.tensor(batch_size, device=device, dtype=torch.float32)
+            total_samples = total_samples + sample_increment
+            total_correct = total_correct + (preds == labels).sum()
 
             event_buffer.reset()
 
@@ -187,7 +203,6 @@ def run_grad(args, logger):
                 delta = args.local_lr * s_scen * actions.detach()
 
                 num_layers = len(network.w_layers)
-                batch_size = input_spikes.size(0)
                 agent_deltas = [
                     torch.zeros((batch_size, *w.shape), device=device, dtype=w.dtype)
                     for w in network.w_layers
@@ -217,12 +232,17 @@ def run_grad(args, logger):
                     chunk_size = min(64, batch_size)
 
                 if chunk_size < batch_size:
-                    grad_chunks = []
+                    grad_chunks = None
                     for start in range(0, input_spikes.size(0), chunk_size):
                         end = start + chunk_size
                         grads_chunk = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes[start:end], labels[start:end])
-                        grad_chunks.append(grads_chunk)
-                    per_sample_grads = tuple(torch.cat([gc[i] for gc in grad_chunks], dim=0) for i in range(len(teacher_params)))
+                        if grad_chunks is None:
+                            grad_chunks = grads_chunk
+                        else:
+                            grad_chunks = tuple(
+                                torch.cat((acc, gc), dim=0) for acc, gc in zip(grad_chunks, grads_chunk)
+                            )
+                    per_sample_grads = grad_chunks if grad_chunks is not None else tuple()
                 else:
                     per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
                 teacher_deltas = [-args.alpha_align * g for g in per_sample_grads]
@@ -277,28 +297,31 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log.append(agent_deltas[li].sum(dim=0).detach())
-                    teacher_deltas_log.append(teacher_deltas[li].sum(dim=0).detach())
+                    agent_deltas_log[li] = torch.cat(
+                        (agent_deltas_log[li], agent_deltas[li].sum(dim=0, keepdim=True)), dim=0
+                    )
+                    teacher_deltas_log[li] = torch.cat(
+                        (teacher_deltas_log[li], teacher_deltas[li].sum(dim=0, keepdim=True)), dim=0
+                    )
 
-                delta_t_values.append(_extract_delta_t(states).detach())
-                delta_d_values.append(actions.detach())
+                delta_t_values = torch.cat((delta_t_values, _extract_delta_t(states)), dim=0)
+                delta_d_values = torch.cat((delta_d_values, actions.detach()), dim=0)
 
-                epoch_reward.append(rewards.detach())
-                epoch_align.append(rewards.detach())
-                epoch_active_ratio.append(active_ratio.detach())
+                total_reward = total_reward + rewards.sum()
+                total_align = total_align + rewards.sum()
+                total_active = total_active + active_ratio
+                active_batches = active_batches + torch.tensor(1.0, device=device)
             else:
-                zero_reward = torch.zeros(input_spikes.size(0), device=device)
-                epoch_reward.append(zero_reward.detach())
-                epoch_align.append(zero_reward.detach())
-                epoch_active_ratio.append(torch.zeros((), device=device))
+                zero_reward_sum = torch.zeros((), device=device)
+                total_reward = total_reward + zero_reward_sum
+                total_align = total_align + zero_reward_sum
+                total_active = total_active + torch.zeros((), device=device)
+                active_batches = active_batches + torch.tensor(1.0, device=device)
 
-        mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
-        reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
-        align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0, device=device)
-        mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
-        mean_align = align_tensor.mean().item() if align_tensor.numel() > 0 else 0.0
-        active_tensor = torch.stack(epoch_active_ratio) if epoch_active_ratio else torch.empty(0, device=device)
-        mean_active = active_tensor.mean().item() if active_tensor.numel() > 0 else 0.0
+        mean_acc = (total_correct / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_reward = (total_reward / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_align = (total_align / total_samples).item() if total_samples.item() > 0 else 0.0
+        mean_active = (total_active / active_batches).item() if active_batches.item() > 0 else 0.0
 
         val_acc, val_reward = _evaluate(network, val_loader, device, args)
         test_acc, test_reward = _evaluate(network, test_loader, device, args)
@@ -323,8 +346,8 @@ def run_grad(args, logger):
             if args.log_gradient_stats:
                 logger.info("Gradient alignment mean (train): %.4f", mean_align)
 
-    delta_t_concat = torch.cat(delta_t_values, dim=0).cpu() if delta_t_values else torch.empty(0)
-    delta_d_concat = torch.cat(delta_d_values, dim=0).cpu() if delta_d_values else torch.empty(0)
+    delta_t_concat = delta_t_values.cpu()
+    delta_d_concat = delta_d_values.cpu()
     if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
         plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
 
