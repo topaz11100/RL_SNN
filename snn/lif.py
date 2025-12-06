@@ -19,7 +19,7 @@ def lif_dynamics(
     v: Tensor,
     I: Tensor,
     params: LIFParams,
-    *,
+    # *,  <-- 이 라인을 제거하여 surrogate와 slope를 일반 인자로 변경 (JIT 호환성 및 위치 인자 호출 지원)
     surrogate: bool = False,
     slope: float = 5.0,
 ) -> Tuple[Tensor, Tensor]:
