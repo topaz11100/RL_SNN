@@ -34,6 +34,7 @@ class ValueFunction(nn.Module):
     def forward(
         self, spike_history: torch.Tensor, extra_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        spike_history = spike_history.float()
         features = self.encoder(spike_history)
         if extra_features is not None:
             features = torch.cat([features, extra_features], dim=-1)

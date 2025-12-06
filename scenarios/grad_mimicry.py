@@ -316,24 +316,24 @@ def run_grad(args, logger):
                     agent_deltas.append(layer_buffer)
 
                 logits = firing_rates * 5.0
-                probs = logits.softmax(dim=1)
-                target = F.one_hot(labels, num_classes=logits.size(1)).to(logits.dtype)
-                grad_next = (probs - target) * 5.0
+                losses = F.cross_entropy(logits, labels, reduction="none")
 
-                pre_activations = [input_spikes.mean(dim=2)] + [sp.mean(dim=2) for sp in hidden_spikes_list]
-                teacher_deltas: list[torch.Tensor] = [torch.empty_like(agent_deltas[li]) for li in range(num_layers)]
+                teacher_deltas: list[torch.Tensor] = [torch.zeros_like(agent_deltas[li]) for li in range(num_layers)]
 
-                surrogate_slope = network.surrogate_slope
-                for li in reversed(range(num_layers)):
-                    pre_act = pre_activations[li]
-                    grad_w = pre_act.unsqueeze(2) * grad_next.unsqueeze(1)
-                    teacher_deltas[li] = -args.alpha_align * grad_w
-                    if li > 0:
-                        w_relu = torch.relu(network.w_layers[li])
-                        grad_next = grad_next @ w_relu.t()
-                        sigma = torch.sigmoid(surrogate_slope * pre_activations[li])
-                        activation_grad = surrogate_slope * sigma * (1.0 - sigma)
-                        grad_next = grad_next * activation_grad
+                for sample_idx in range(batch_size):
+                    retain = sample_idx < batch_size - 1
+                    grads = torch.autograd.grad(
+                        losses[sample_idx],
+                        network.w_layers,
+                        retain_graph=retain,
+                        allow_unused=True,
+                    )
+                    for li, grad in enumerate(grads):
+                        if grad is None:
+                            grad_fill = torch.zeros_like(network.w_layers[li])
+                        else:
+                            grad_fill = grad
+                        teacher_deltas[li][sample_idx].copy_(-args.alpha_align * grad_fill.detach())
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
