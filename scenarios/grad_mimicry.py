@@ -333,6 +333,7 @@ def run_grad(args, logger):
                     if li > 0:
                         w_relu = torch.relu(network.w_layers[li])
                         grad_next = grad_next @ w_relu.t()
+                        grad_next = grad_next * (pre_activations[li - 1] > 0).to(grad_next.dtype)
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
