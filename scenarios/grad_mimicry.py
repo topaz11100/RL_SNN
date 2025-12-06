@@ -3,7 +3,6 @@ from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.func import functional_call, grad, vmap
 
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EventBatchBuffer
@@ -208,7 +207,6 @@ def run_grad(args, logger):
     optimizer_critic = torch.optim.Adam(critic.parameters(), lr=args.lr_critic)
 
     layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
-    param_names = [name for name, _ in network.named_parameters()]
     synapse_pre_sum = sum(shape[0] for shape in network.synapse_shapes)
     estimated_events = args.batch_size_images * args.spike_array_len * synapse_pre_sum
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
@@ -235,6 +233,7 @@ def run_grad(args, logger):
     total_synapses = sum(w.numel() for w in network.w_layers)
 
     s_scen = 1.0
+    ones_scalar = torch.tensor(1.0, device=device)
     for epoch in range(1, args.num_epochs + 1):
         total_correct = torch.zeros((), device=device)
         total_reward = torch.zeros((), device=device)
@@ -251,7 +250,7 @@ def run_grad(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
-            sample_increment = torch.tensor(batch_size, device=device, dtype=torch.float32)
+            sample_increment = labels.new_full((), batch_size, dtype=torch.float32)
             total_samples = total_samples + sample_increment
             total_correct = total_correct + (preds == labels).sum()
 
@@ -319,35 +318,21 @@ def run_grad(args, logger):
                         layer_buffer.zero_()
                     agent_deltas.append(layer_buffer)
 
-                teacher_params = tuple(param.detach().requires_grad_(True) for param in network.parameters())
+                logits = firing_rates * 5.0
+                probs = logits.softmax(dim=1)
+                target = F.one_hot(labels, num_classes=logits.size(1)).to(logits.dtype)
+                grad_next = (probs - target) * 5.0
 
-                def loss_fn(params, spikes, label):
-                    params_dict = {name: p for name, p in zip(param_names, params)}
-                    _, _, firing_teacher = functional_call(network, params_dict, (spikes.unsqueeze(0),))
-                    logits = firing_teacher * 5.0
-                    return F.cross_entropy(logits, label.unsqueeze(0))
+                pre_activations = [input_spikes.mean(dim=2)] + [sp.mean(dim=2) for sp in hidden_spikes_list]
+                teacher_deltas: list[torch.Tensor] = [torch.empty_like(agent_deltas[li]) for li in range(num_layers)]
 
-                grad_fn = grad(loss_fn)
-                batch_size = input_spikes.size(0)
-                chunk_size = getattr(args, "grad_chunk_size", 0)
-                if chunk_size <= 0:
-                    chunk_size = min(64, batch_size)
-
-                if chunk_size < batch_size:
-                    grad_chunks = None
-                    for start in range(0, input_spikes.size(0), chunk_size):
-                        end = start + chunk_size
-                        grads_chunk = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes[start:end], labels[start:end])
-                        if grad_chunks is None:
-                            grad_chunks = grads_chunk
-                        else:
-                            grad_chunks = tuple(
-                                torch.cat((acc, gc), dim=0) for acc, gc in zip(grad_chunks, grads_chunk)
-                            )
-                    per_sample_grads = grad_chunks if grad_chunks is not None else tuple()
-                else:
-                    per_sample_grads = vmap(grad_fn, in_dims=(None, 0, 0))(teacher_params, input_spikes, labels)
-                teacher_deltas = [-args.alpha_align * g for g in per_sample_grads]
+                for li in reversed(range(num_layers)):
+                    pre_act = pre_activations[li]
+                    grad_w = pre_act.unsqueeze(2) * grad_next.unsqueeze(1)
+                    teacher_deltas[li] = -args.alpha_align * grad_w
+                    if li > 0:
+                        w_relu = torch.relu(network.w_layers[li])
+                        grad_next = grad_next @ w_relu.t()
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
@@ -409,13 +394,13 @@ def run_grad(args, logger):
                 total_reward = total_reward + rewards.sum()
                 total_align = total_align + rewards.sum()
                 total_active = total_active + active_ratio
-                active_batches = active_batches + torch.tensor(1.0, device=device)
+                active_batches = active_batches + ones_scalar
             else:
                 zero_reward_sum = torch.zeros((), device=device)
                 total_reward = total_reward + zero_reward_sum
                 total_align = total_align + zero_reward_sum
                 total_active = total_active + torch.zeros((), device=device)
-                active_batches = active_batches + torch.tensor(1.0, device=device)
+                active_batches = active_batches + ones_scalar
 
         mean_acc = (total_correct / total_samples).item() if total_samples.item() > 0 else 0.0
         mean_reward = (total_reward / total_samples).item() if total_samples.item() > 0 else 0.0

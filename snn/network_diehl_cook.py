@@ -11,10 +11,10 @@ def _diehl_cook_forward_script(
     input_spikes: Tensor,
     w_input_exc: Tensor,
     w_inh_exc: Tensor,
+    w_inh_exc_masked: Tensor,
     exc_params: LIFParams,
     inh_params: LIFParams,
     weight_ei: float,
-    inh_exc_mask: Tensor,
 ) -> Tuple[Tensor, Tensor]:
     batch_size, _, T = input_spikes.shape
     dtype = input_spikes.dtype
@@ -27,8 +27,6 @@ def _diehl_cook_forward_script(
 
     exc_spikes = torch.empty((batch_size, w_input_exc.size(1), T), device=input_spikes.device, dtype=dtype)
     inh_spikes = torch.empty((batch_size, w_inh_exc.size(0), T), device=input_spikes.device, dtype=dtype)
-
-    w_inh_exc_masked = torch.relu(w_inh_exc) * inh_exc_mask
 
     I_exc_all = torch.matmul(input_spikes.permute(0, 2, 1), torch.relu(w_input_exc))
 
@@ -82,12 +80,13 @@ class DiehlCookNetwork(nn.Module):
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
 
         # Optimized: use scripted functional core for fused time-loop on GPU/CPU.
+        w_inh_exc_masked = torch.relu(self.w_inh_exc) * self.inh_exc_mask
         return _diehl_cook_forward_script(
             input_spikes,
             self.w_input_exc,
             self.w_inh_exc,
+            w_inh_exc_masked,
             self.exc_params,
             self.inh_params,
             self.weight_ei,
-            self.inh_exc_mask,
         )

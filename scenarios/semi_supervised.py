@@ -53,9 +53,8 @@ def _compute_reward_components(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     preds = firing_rates.argmax(dim=1)
     correct = preds == labels
-    r_cls = torch.where(
-        correct, torch.tensor(1.0, device=firing_rates.device), torch.tensor(-1.0, device=firing_rates.device)
-    )
+    ones = torch.ones_like(firing_rates[:, 0])
+    r_cls = torch.where(correct, ones, -ones)
     true_rates = firing_rates.gather(1, labels.view(-1, 1)).squeeze(1)
     masked_rates = firing_rates.clone()
     masked_rates.scatter_(1, labels.view(-1, 1), -1e9)
@@ -223,7 +222,7 @@ def run_semi(args, logger):
 
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
-            sample_increment = torch.tensor(batch_size, device=device, dtype=torch.float32)
+            sample_increment = labels.new_full((), batch_size, dtype=torch.float32)
             total_samples = total_samples + sample_increment
             total_correct = total_correct + (preds == labels).sum()
 

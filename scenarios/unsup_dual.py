@@ -207,8 +207,7 @@ def run_unsup2(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
-    base_len = len(getattr(train_loader.dataset, "dataset", train_loader.dataset))
-    prev_winners = torch.full((base_len,), -1, device=device, dtype=torch.long)
+    prev_winners = torch.full((60000,), -1, device=device, dtype=torch.long)
     winner_counts = torch.zeros(args.N_E, device=device)
     total_seen = torch.zeros((), device=device, dtype=winner_counts.dtype)
 
@@ -238,6 +237,8 @@ def run_unsup2(args, logger):
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
+    pos_reward = torch.tensor(1.0, device=device)
+    neg_reward = torch.tensor(-1.0, device=device)
     for epoch in range(1, args.num_epochs + 1):
         total_sparse = torch.zeros((), device=device)
         total_div = torch.zeros((), device=device)
@@ -255,15 +256,11 @@ def run_unsup2(args, logger):
             winners = firing_rates.argmax(dim=1)
 
             prev_values = prev_winners[indices]
-            stable_mask = prev_values >= 0
-            r_stab = torch.where(
-                stable_mask & (winners == prev_values),
-                torch.tensor(1.0, device=device),
-                torch.tensor(0.0, device=device),
-            )
-            r_stab = torch.where(
-                stable_mask & (winners != prev_values), torch.tensor(-1.0, device=device), r_stab
-            )
+            first_visit = prev_values == -1
+            stable_mask = ~first_visit
+            r_stab = torch.zeros_like(prev_values, dtype=torch.float32, device=device)
+            r_stab = torch.where(stable_mask & (winners == prev_values), pos_reward, r_stab)
+            r_stab = torch.where(stable_mask & (winners != prev_values), neg_reward, r_stab)
             prev_winners[indices] = winners
 
             one_hot_winners = F.one_hot(winners, num_classes=args.N_E).to(dtype=winner_counts.dtype)
@@ -312,7 +309,7 @@ def run_unsup2(args, logger):
             )
 
             batch_size = winners.numel()
-            sample_increment = torch.tensor(batch_size, device=device, dtype=torch.float32)
+            sample_increment = winners.new_full((), batch_size, dtype=torch.float32)
             total_samples = total_samples + sample_increment
             total_sparse = total_sparse + r_sparse.sum()
             total_div = total_div + r_div.sum()

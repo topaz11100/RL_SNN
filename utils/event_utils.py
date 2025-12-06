@@ -48,19 +48,19 @@ def _pairwise_indices(
     for start in range(0, primary_events.size(0), block_events):
         end = min(start + block_events, primary_events.size(0))
         chunk = primary_events[start:end]
-        # (chunk, other_count)
-        batch_grid = chunk[:, 0].unsqueeze(1).expand(-1, other_count)
-        primary_grid = chunk[:, 1].unsqueeze(1).expand(-1, other_count)
-        other_grid = other_indices_full.unsqueeze(0).expand(chunk.size(0), -1)
-        time_grid = chunk[:, 2].unsqueeze(1).expand(-1, other_count)
+        if chunk.numel() == 0:
+            continue
 
-        flat_batch = batch_grid.reshape(-1)
-        flat_primary = primary_grid.reshape(-1)
-        flat_other = other_grid.reshape(-1)
-        flat_time = time_grid.reshape(-1)
+        repeats = other_count
+        flat_batch = chunk[:, 0].repeat_interleave(repeats)
+        flat_primary = chunk[:, 1].repeat_interleave(repeats)
+        flat_other = other_indices_full.repeat(chunk.size(0))
+        flat_time = chunk[:, 2].repeat_interleave(repeats)
 
         if valid_mask is not None:
             keep = valid_mask[flat_primary, flat_other].nonzero(as_tuple=False).squeeze(1)
+            if keep.numel() == 0:
+                continue
             flat_batch = flat_batch.index_select(0, keep)
             flat_primary = flat_primary.index_select(0, keep)
             flat_other = flat_other.index_select(0, keep)
