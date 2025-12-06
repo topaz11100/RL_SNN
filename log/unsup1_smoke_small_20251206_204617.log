@@ -1,0 +1,24 @@
+Traceback (most recent call last):
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/main.py", line 3, in <module>
+    from scenarios.grad_mimicry import run_grad
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/scenarios/grad_mimicry.py", line 14, in <module>
+    from snn.network_grad_mimicry import GradMimicryNetwork
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/snn/network_grad_mimicry.py", line 9, in <module>
+    @torch.jit.script
+     ^^^^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/jit/_script.py", line 1443, in script
+    ret = _script_impl(
+          ^^^^^^^^^^^^^
+  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.11/site-packages/torch/jit/_script.py", line 1214, in _script_impl
+    fn = torch._C._jit_script_compile(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: 
+Expression of type dots cannot be used in a type expression:
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/snn/network_grad_mimicry.py", line 12
+def _grad_mimicry_forward_script(
+    input_spikes: Tensor,
+    w_layers: Tuple[Tensor, ...],
+                            ~~~ <--- HERE
+    hidden_sizes: List[int],
+    hidden_params: LIFParams,
+
