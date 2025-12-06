@@ -17,6 +17,8 @@ def ppo_update(
     c_v: float = 1.0,
 ):
     states, extras, actions, log_probs_old, values_old, rewards = buffer.get_batch()
+    log_probs_old = log_probs_old.detach()
+    actions = actions.detach()
     advantages = (rewards - values_old).detach()
     adv_mean = advantages.mean()
     adv_std = advantages.std()
@@ -76,6 +78,8 @@ def ppo_update_events(
 ):
     """PPO update using flattened event batches."""
 
+    log_probs_old = log_probs_old.detach()
+    actions_old = actions_old.detach()
     num_samples = states.size(0)
     if num_samples == 0:
         return

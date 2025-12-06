@@ -183,6 +183,7 @@ def _forward_in_event_batches(actor, critic, states, extras, batch_size):
         states_mb = states[start:end]
         extras_mb = extras[start:end] if extras_available else None
         action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
+        log_prob_mb = log_prob_mb.detach()
         value_mb = critic(states_mb, extras_mb)
         if actions_cat is None:
             actions_cat = action_mb
@@ -322,6 +323,7 @@ def run_grad(args, logger):
                 pre_activations = [input_spikes.mean(dim=2)] + [sp.mean(dim=2) for sp in hidden_spikes_list]
                 teacher_deltas: list[torch.Tensor] = [torch.empty_like(agent_deltas[li]) for li in range(num_layers)]
 
+                surrogate_slope = network.surrogate_slope
                 for li in reversed(range(num_layers)):
                     pre_act = pre_activations[li]
                     grad_w = pre_act.unsqueeze(2) * grad_next.unsqueeze(1)
@@ -329,8 +331,9 @@ def run_grad(args, logger):
                     if li > 0:
                         w_relu = torch.relu(network.w_layers[li])
                         grad_next = grad_next @ w_relu.t()
-                        activation_mask = (pre_activations[li] > 0).to(grad_next.dtype)
-                        grad_next = grad_next * activation_mask
+                        sigma = torch.sigmoid(surrogate_slope * pre_activations[li])
+                        activation_grad = surrogate_slope * sigma * (1.0 - sigma)
+                        grad_next = grad_next * activation_grad
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)

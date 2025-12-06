@@ -21,59 +21,20 @@ def _select_windows(
     return padded_spikes[batch_idx.unsqueeze(1), neuron_idx.unsqueeze(1), gather_times]
 
 
-def _pairwise_indices(
-    primary_events: torch.Tensor,
-    other_count: int,
-    *,
-    max_pairs: int,
-    device,
-    valid_mask: torch.Tensor | None,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Chunked pre/post 페어 인덱스 생성.
+def _extract_events(spikes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mask = spikes.to(torch.bool)
+    if not mask.any():
+        empty = torch.empty(0, device=spikes.device, dtype=torch.long)
+        return empty, empty, empty
 
-    repeat_interleave 로 전체 조합을 한 번에 만들 때 발생하는 거대한 임시
-    텐서를 피하기 위해, `max_pairs` 에 맞춰 이벤트 블록을 잘라 처리한다.
-    """
+    batch_range = torch.arange(spikes.size(0), device=spikes.device)[:, None, None]
+    neuron_range = torch.arange(spikes.size(1), device=spikes.device)[None, :, None]
+    time_range = torch.arange(spikes.size(2), device=spikes.device)[None, None, :]
 
-    batch_list: list[torch.Tensor] = []
-    primary_list: list[torch.Tensor] = []
-    other_list: list[torch.Tensor] = []
-
-    if primary_events.numel() == 0:
-        return batch_list, primary_list, other_list
-
-    block_events = max(1, max_pairs // max(other_count, 1))
-    other_indices_full = torch.arange(other_count, device=device)
-
-    for start in range(0, primary_events.size(0), block_events):
-        end = min(start + block_events, primary_events.size(0))
-        chunk = primary_events[start:end]
-        if chunk.numel() == 0:
-            continue
-
-        repeats = other_count
-        flat_batch = chunk[:, 0].repeat_interleave(repeats)
-        flat_primary = chunk[:, 1].repeat_interleave(repeats)
-        flat_other = other_indices_full.repeat(chunk.size(0))
-        flat_time = chunk[:, 2].repeat_interleave(repeats)
-
-        if valid_mask is not None:
-            keep = valid_mask[flat_primary, flat_other].nonzero(as_tuple=False).squeeze(1)
-            if keep.numel() == 0:
-                continue
-            flat_batch = flat_batch.index_select(0, keep)
-            flat_primary = flat_primary.index_select(0, keep)
-            flat_other = flat_other.index_select(0, keep)
-            flat_time = flat_time.index_select(0, keep)
-
-        if flat_batch.numel() == 0:
-            continue
-
-        batch_list.append(torch.stack([flat_batch, flat_time], dim=1))
-        primary_list.append(flat_primary)
-        other_list.append(flat_other)
-
-    return batch_list, primary_list, other_list
+    batch_idx = batch_range.expand_as(spikes)[mask]
+    neuron_idx = neuron_range.expand_as(spikes)[mask]
+    time_idx = time_range.expand_as(spikes)[mask]
+    return batch_idx, neuron_idx, time_idx
 
 
 def _build_states_and_extras(
@@ -104,6 +65,8 @@ def _build_states_and_extras(
     extras_parts.append(_expand_event_type(event_type, weights_sel.size(0), device, weights.dtype))
     extras = torch.cat(extras_parts, dim=1)
     return states, extras
+
+
 def gather_events(
     pre_spikes: torch.Tensor,
     post_spikes: torch.Tensor,
@@ -127,6 +90,7 @@ def gather_events(
     """
 
     device = pre_spikes.device
+    _ = max_pairs  # Legacy argument retained for API compatibility.
     n_pre = pre_spikes.shape[1]
     n_post = post_spikes.shape[1]
 
@@ -134,23 +98,7 @@ def gather_events(
     padded_post = padded_post if padded_post is not None else F.pad(post_spikes, (window - 1, 0))
     weight_snapshot = weights.detach()
 
-    pre_events = pre_spikes.nonzero(as_tuple=False)
-    batch_time_pre, primary_pre, other_pre = _pairwise_indices(
-        pre_events, n_post, max_pairs=max_pairs, device=device, valid_mask=valid_mask
-    )
-    for bt, pre_idx, post_idx in zip(batch_time_pre, primary_pre, other_pre):
-        states, extras = _build_states_and_extras(
-            padded_pre,
-            padded_post,
-            window,
-            weight_snapshot,
-            l_norm=l_norm,
-            event_type=_EVENT_TYPE_PRE,
-            batch_and_time=bt,
-            pre_idx=pre_idx,
-            post_idx=post_idx,
-            device=device,
-        )
+    def _write_events(states: torch.Tensor, extras: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, batch_idx: torch.Tensor) -> None:
         states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
             states.size(0),
             state_shape=states.shape,
@@ -160,46 +108,80 @@ def gather_events(
             extras_dtype=extras.dtype if extras.numel() > 0 else weight_snapshot.dtype,
         )
         if states_view.numel() == 0:
-            continue
+            return
         states_view.copy_(states)
         if extras_view.numel() > 0:
             extras_view.copy_(extras)
         conn_view.fill_(connection_id)
         pre_view.copy_(pre_idx)
         post_view.copy_(post_idx)
-        batch_view.copy_(bt[:, 0])
+        batch_view.copy_(batch_idx)
 
-    post_events = post_spikes.nonzero(as_tuple=False)
-    batch_time_post, primary_post, other_post = _pairwise_indices(
-        post_events, n_pre, max_pairs=max_pairs, device=device, valid_mask=valid_mask
-    )
-    for bt, pre_idx, post_idx in zip(batch_time_post, other_post, primary_post):
-        states, extras = _build_states_and_extras(
-            padded_pre,
-            padded_post,
-            window,
-            weight_snapshot,
-            l_norm=l_norm,
-            event_type=_EVENT_TYPE_POST,
-            batch_and_time=bt,
-            pre_idx=pre_idx,
-            post_idx=post_idx,
-            device=device,
-        )
-        states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
-            states.size(0),
-            state_shape=states.shape,
-            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
-            device=device,
-            state_dtype=states.dtype,
-            extras_dtype=extras.dtype if extras.numel() > 0 else weight_snapshot.dtype,
-        )
-        if states_view.numel() == 0:
-            continue
-        states_view.copy_(states)
-        if extras_view.numel() > 0:
-            extras_view.copy_(extras)
-        conn_view.fill_(connection_id)
-        pre_view.copy_(pre_idx)
-        post_view.copy_(post_idx)
-        batch_view.copy_(bt[:, 0])
+    if valid_mask is not None:
+        valid_mask = valid_mask.to(device=device, dtype=torch.bool)
+
+    # Pre-synaptic spikes paired with all post-synaptic neurons (masked if provided).
+    batch_pre, pre_indices, time_pre = _extract_events(pre_spikes)
+    if batch_pre.numel() > 0:
+        post_all = torch.arange(n_post, device=device)
+        repeat_factor = n_post
+        batch_rep = batch_pre.repeat_interleave(repeat_factor)
+        time_rep = time_pre.repeat_interleave(repeat_factor)
+        pre_rep = pre_indices.repeat_interleave(repeat_factor)
+        post_rep = post_all.repeat(batch_pre.size(0))
+
+        if valid_mask is not None:
+            keep = valid_mask[pre_rep, post_rep]
+            batch_rep = batch_rep[keep]
+            time_rep = time_rep[keep]
+            pre_rep = pre_rep[keep]
+            post_rep = post_rep[keep]
+
+        if batch_rep.numel() > 0:
+            batch_time = torch.stack((batch_rep, time_rep), dim=1)
+            states, extras = _build_states_and_extras(
+                padded_pre,
+                padded_post,
+                window,
+                weight_snapshot,
+                l_norm=l_norm,
+                event_type=_EVENT_TYPE_PRE,
+                batch_and_time=batch_time,
+                pre_idx=pre_rep,
+                post_idx=post_rep,
+                device=device,
+            )
+            _write_events(states, extras, pre_rep, post_rep, batch_rep)
+
+    # Post-synaptic spikes paired with all pre-synaptic neurons (masked if provided).
+    batch_post, post_indices, time_post = _extract_events(post_spikes)
+    if batch_post.numel() > 0:
+        pre_all = torch.arange(n_pre, device=device)
+        repeat_factor = n_pre
+        batch_rep = batch_post.repeat_interleave(repeat_factor)
+        time_rep = time_post.repeat_interleave(repeat_factor)
+        pre_rep = pre_all.repeat(batch_post.size(0))
+        post_rep = post_indices.repeat_interleave(repeat_factor)
+
+        if valid_mask is not None:
+            keep = valid_mask[pre_rep, post_rep]
+            batch_rep = batch_rep[keep]
+            time_rep = time_rep[keep]
+            pre_rep = pre_rep[keep]
+            post_rep = post_rep[keep]
+
+        if batch_rep.numel() > 0:
+            batch_time = torch.stack((batch_rep, time_rep), dim=1)
+            states, extras = _build_states_and_extras(
+                padded_pre,
+                padded_post,
+                window,
+                weight_snapshot,
+                l_norm=l_norm,
+                event_type=_EVENT_TYPE_POST,
+                batch_and_time=batch_time,
+                pre_idx=pre_rep,
+                post_idx=post_rep,
+                device=device,
+            )
+            _write_events(states, extras, pre_rep, post_rep, batch_rep)
