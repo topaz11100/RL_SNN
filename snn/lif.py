@@ -1,25 +1,32 @@
-from dataclasses import dataclass
 from typing import Tuple
 
 import torch
 from torch import Tensor, nn
 
 
-@dataclass
-class LIFParams:
-    tau: float = 20.0
-    v_th: float = 1.0
-    v_reset: float = 0.0
-    v_rest: float = 0.0
-    dt: float = 1.0
-    R: float = 1.0
+@torch.jit.script
+class LIFParams(object):
+    def __init__(
+        self,
+        tau: float = 20.0,
+        v_th: float = 1.0,
+        v_reset: float = 0.0,
+        v_rest: float = 0.0,
+        dt: float = 1.0,
+        R: float = 1.0,
+    ):
+        self.tau = tau
+        self.v_th = v_th
+        self.v_reset = v_reset
+        self.v_rest = v_rest
+        self.dt = dt
+        self.R = R
 
 
 def lif_dynamics(
     v: Tensor,
     I: Tensor,
     params: LIFParams,
-    # *,  <-- 이 라인을 제거하여 surrogate와 slope를 일반 인자로 변경 (JIT 호환성 및 위치 인자 호출 지원)
     surrogate: bool = False,
     slope: float = 5.0,
 ) -> Tuple[Tensor, Tensor]:
