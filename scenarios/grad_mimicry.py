@@ -105,12 +105,14 @@ def run_grad(args, logger):
 
     layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
     param_names = [name for name, _ in network.named_parameters()]
-    event_buffer = EventBatchBuffer(initial_capacity=args.batch_size_images * args.spike_array_len)
+    synapse_pre_sum = sum(shape[0] for shape in network.synapse_shapes)
+    estimated_events = args.batch_size_images * args.spike_array_len * synapse_pre_sum
+    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
     metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
-    _ensure_metrics_file(metrics_train, "epoch\tacc\treward\talign")
+    _ensure_metrics_file(metrics_train, "epoch\tacc\treward\talign\tactive_ratio")
     _ensure_metrics_file(metrics_val, "epoch\tacc\treward\talign")
     _ensure_metrics_file(metrics_test, "epoch\tacc\treward\talign")
 
@@ -120,10 +122,11 @@ def run_grad(args, logger):
     delta_d_values = []
 
     weights_before = [w.detach().cpu().clone() for w in network.w_layers]
+    total_synapses = sum(w.numel() for w in network.w_layers)
 
     s_scen = 1.0
     for epoch in range(1, args.num_epochs + 1):
-        epoch_acc, epoch_reward, epoch_align = [], [], []
+        epoch_acc, epoch_reward, epoch_align, epoch_active_ratio = [], [], [], []
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -208,8 +211,12 @@ def run_grad(args, logger):
                     return F.cross_entropy(logits, label.unsqueeze(0))
 
                 grad_fn = grad(loss_fn)
+                batch_size = input_spikes.size(0)
                 chunk_size = getattr(args, "grad_chunk_size", 0)
-                if chunk_size and chunk_size > 0:
+                if chunk_size <= 0:
+                    chunk_size = min(64, batch_size)
+
+                if chunk_size < batch_size:
                     grad_chunks = []
                     for start in range(0, input_spikes.size(0), chunk_size):
                         end = start + chunk_size
@@ -223,12 +230,16 @@ def run_grad(args, logger):
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
                 active_count = torch.zeros(batch_size, device=device, dtype=acc_dtype)
+                active_ratio = torch.zeros((), device=device, dtype=torch.float32)
 
                 for li in range(num_layers):
                     mask = agent_deltas[li].ne(0).to(acc_dtype)
                     diff = agent_deltas[li] - teacher_deltas[li]
                     squared_error_sum = squared_error_sum + (diff.pow(2) * mask).sum(dim=(1, 2))
                     active_count = active_count + mask.sum(dim=(1, 2))
+
+                if total_synapses > 0:
+                    active_ratio = active_count.sum().float() / (batch_size * float(total_synapses))
 
                 align_loss = torch.where(
                     active_count > 0,
@@ -274,22 +285,26 @@ def run_grad(args, logger):
 
                 epoch_reward.append(rewards.detach())
                 epoch_align.append(rewards.detach())
+                epoch_active_ratio.append(active_ratio.detach())
             else:
                 zero_reward = torch.zeros(input_spikes.size(0), device=device)
                 epoch_reward.append(zero_reward.detach())
                 epoch_align.append(zero_reward.detach())
+                epoch_active_ratio.append(torch.zeros((), device=device))
 
         mean_acc = torch.stack(epoch_acc).mean().item() if epoch_acc else 0.0
         reward_tensor = torch.cat(epoch_reward) if epoch_reward else torch.empty(0, device=device)
         align_tensor = torch.cat(epoch_align) if epoch_align else torch.empty(0, device=device)
         mean_reward = reward_tensor.mean().item() if reward_tensor.numel() > 0 else 0.0
         mean_align = align_tensor.mean().item() if align_tensor.numel() > 0 else 0.0
+        active_tensor = torch.stack(epoch_active_ratio) if epoch_active_ratio else torch.empty(0, device=device)
+        mean_active = active_tensor.mean().item() if active_tensor.numel() > 0 else 0.0
 
         val_acc, val_reward = _evaluate(network, val_loader, device, args)
         test_acc, test_reward = _evaluate(network, test_loader, device, args)
 
         with open(metrics_train, "a") as f:
-            f.write(f"{epoch}\t{mean_acc:.6f}\t{mean_reward:.6f}\t{mean_align:.6f}\n")
+            f.write(f"{epoch}\t{mean_acc:.6f}\t{mean_reward:.6f}\t{mean_align:.6f}\t{mean_active:.6f}\n")
         with open(metrics_val, "a") as f:
             f.write(f"{epoch}\t{val_acc:.6f}\t{val_reward:.6f}\t0.000000\n")
         with open(metrics_test, "a") as f:

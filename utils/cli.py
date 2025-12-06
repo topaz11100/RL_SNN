@@ -57,7 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-critic", type=float, default=1e-3, help="Learning rate for critic")
     parser.add_argument("--ppo-eps", type=float, default=0.2, help="PPO clipping epsilon")
     parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO epochs per update")
-    parser.add_argument("--ppo-batch-size", type=int, default=8, help="Mini-batch size inside PPO update")
+    parser.add_argument(
+        "--ppo-batch-size",
+        type=int,
+        default=512,
+        help="Mini-batch size inside PPO update (larger for stable event-driven SGD)",
+    )
     parser.add_argument(
         "--exc-clip-min",
         type=float,
