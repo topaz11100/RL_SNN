@@ -77,6 +77,21 @@ def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
     return last_pre - last_post
 
 
+def _forward_in_event_batches(actor, critic, states, extras, batch_size):
+    actions, log_probs, values = [], [], []
+    extras_available = extras.numel() > 0
+    for start in range(0, states.size(0), batch_size):
+        end = start + batch_size
+        states_mb = states[start:end]
+        extras_mb = extras[start:end] if extras_available else None
+        action_mb, log_prob_mb, _ = actor(states_mb, extras_mb)
+        value_mb = critic(states_mb, extras_mb)
+        actions.append(action_mb)
+        log_probs.append(log_prob_mb)
+        values.append(value_mb)
+    return torch.cat(actions, dim=0), torch.cat(log_probs, dim=0), torch.cat(values, dim=0)
+
+
 def run_grad(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
@@ -162,8 +177,9 @@ def run_grad(args, logger):
 
             if len(event_buffer) > 0:
                 states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
-                actions, log_probs_old, _ = actor(states, extras)
-                values_old = critic(states, extras)
+                actions, log_probs_old, values_old = _forward_in_event_batches(
+                    actor, critic, states, extras, batch_size=args.event_batch_size
+                )
 
                 delta = args.local_lr * s_scen * actions.detach()
 
