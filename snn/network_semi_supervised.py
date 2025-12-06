@@ -23,8 +23,8 @@ def _semi_supervised_forward_script(
     s_hidden_prev = torch.zeros_like(v_hidden)
     s_output_prev = torch.zeros_like(v_output)
 
-    hidden_hist: Tuple[Tensor, ...] = ()
-    output_hist: Tuple[Tensor, ...] = ()
+    hidden_spikes = torch.empty((batch_size, w_input_hidden.size(1), T), device=input_spikes.device, dtype=dtype)
+    output_spikes = torch.empty((batch_size, w_hidden_output.size(1), T), device=input_spikes.device, dtype=dtype)
 
     I_hidden_all = torch.matmul(input_spikes.permute(0, 2, 1), torch.relu(w_input_hidden))
 
@@ -35,14 +35,11 @@ def _semi_supervised_forward_script(
         I_output = torch.matmul(s_hidden_prev, torch.relu(w_hidden_output))
         v_output, s_output = lif_step_script(v_output, I_output, output_params)
 
-        hidden_hist = hidden_hist + (s_hidden,)
-        output_hist = output_hist + (s_output,)
+        hidden_spikes[:, :, t] = s_hidden
+        output_spikes[:, :, t] = s_output
 
         s_hidden_prev = s_hidden
         s_output_prev = s_output
-
-    hidden_spikes = torch.stack(hidden_hist, dim=2)
-    output_spikes = torch.stack(output_hist, dim=2)
 
     firing_rates = output_spikes.mean(dim=2)
     return hidden_spikes, output_spikes, firing_rates

@@ -23,11 +23,27 @@ def _ensure_metrics_file(path: str, header: str) -> None:
             f.write(header + "\n")
 
 
-def _scatter_updates(delta: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    delta_matrix = torch.zeros_like(weights)
-    flat_index = pre_idx * weights.size(1) + post_idx
-    delta_matrix.view(-1).scatter_add_(0, flat_index, delta)
-    return delta_matrix
+def _scatter_updates(
+    delta: torch.Tensor,
+    batch_idx: torch.Tensor,
+    pre_idx: torch.Tensor,
+    post_idx: torch.Tensor,
+    buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Accumulate sparse updates into a preallocated buffer.
+
+    The buffer is zeroed in-place and reused across calls to avoid frequent
+    allocations during PPO loops.
+    """
+
+    buffer.zero_()
+    if delta.numel() == 0:
+        return buffer
+
+    synapse_stride = buffer.size(1) * buffer.size(2)
+    flat_index = batch_idx * synapse_stride + pre_idx * buffer.size(2) + post_idx
+    buffer.view(-1).scatter_add_(0, flat_index, delta)
+    return buffer
 
 
 def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float, float]:
@@ -77,6 +93,89 @@ def _extract_delta_t(states: torch.Tensor) -> torch.Tensor:
     return last_pre - last_post
 
 
+def analyze_stdp_profile(
+    network: GradMimicryNetwork,
+    actor: GaussianPolicy,
+    critic: ValueFunction,
+    loader,
+    args,
+    device: torch.device,
+) -> None:
+    network_state = network.training
+    actor_state = actor.training
+    critic_state = critic.training
+    network.eval()
+    actor.eval()
+    critic.eval()
+
+    try:
+        images, _, _ = next(iter(loader))
+    except StopIteration:
+        return
+
+    layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
+    estimated_events = args.batch_size_images * args.spike_array_len * sum(shape[0] for shape in network.synapse_shapes)
+    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+
+    with torch.no_grad():
+        images = images.to(device, non_blocking=True)
+        input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
+        hidden_spikes_list, output_spikes, _ = network(input_spikes)
+
+        event_buffer.reset()
+        padded_cache = {}
+
+        def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
+            key = id(spikes)
+            if key not in padded_cache:
+                padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
+            return padded_cache[key]
+
+        prev_spikes = input_spikes
+        for li, hidden_spikes in enumerate(hidden_spikes_list):
+            gather_events(
+                prev_spikes,
+                hidden_spikes,
+                network.w_layers[li],
+                args.spike_array_len,
+                event_buffer,
+                li,
+                l_norm=layer_norms[li],
+                padded_pre=_get_padded(prev_spikes),
+                padded_post=_get_padded(hidden_spikes),
+            )
+            prev_spikes = hidden_spikes
+
+        gather_events(
+            prev_spikes,
+            output_spikes,
+            network.w_layers[-1],
+            args.spike_array_len,
+            event_buffer,
+            len(network.w_layers) - 1,
+            l_norm=layer_norms[-1],
+            padded_pre=_get_padded(prev_spikes),
+            padded_post=_get_padded(output_spikes),
+        )
+
+        if len(event_buffer) > 0:
+            states, extras, *_ = event_buffer.flatten()
+            actions, _, _ = _forward_in_event_batches(
+                actor, critic, states, extras, batch_size=args.event_batch_size
+            )
+            delta_t = _extract_delta_t(states).cpu()
+            delta_d = actions.detach().cpu()
+            if delta_t.numel() > 0 and delta_d.numel() > 0:
+                plot_delta_t_delta_d(delta_t, delta_d, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+
+    if network_state:
+        network.train()
+    if actor_state:
+        actor.train()
+    if critic_state:
+        critic.train()
+
+
 def _forward_in_event_batches(actor, critic, states, extras, batch_size):
     actions_cat, log_probs_cat, values_cat = None, None, None
     extras_available = extras.numel() > 0
@@ -114,6 +213,11 @@ def run_grad(args, logger):
     estimated_events = args.batch_size_images * args.spike_array_len * synapse_pre_sum
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
+    max_batch_size = args.batch_size_images
+    update_buffers = [
+        torch.zeros((max_batch_size, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
+    ]
+
     metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
     metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
     metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
@@ -127,9 +231,6 @@ def run_grad(args, logger):
     teacher_deltas_log = [
         torch.empty((0, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
     ]
-    delta_t_values = torch.empty(0, device=device)
-    delta_d_values = torch.empty(0, device=device)
-
     weights_before = [w.detach().cpu().clone() for w in network.w_layers]
     total_synapses = sum(w.numel() for w in network.w_layers)
 
@@ -203,19 +304,20 @@ def run_grad(args, logger):
                 delta = args.local_lr * s_scen * actions.detach()
 
                 num_layers = len(network.w_layers)
-                agent_deltas = [
-                    torch.zeros((batch_size, *w.shape), device=device, dtype=w.dtype)
-                    for w in network.w_layers
-                ]
+                agent_deltas = []
 
                 for li in range(num_layers):
                     layer_mask = connection_ids == li
+                    layer_buffer = update_buffers[li][:batch_size]
                     if layer_mask.any():
                         batch_layer = batch_idx_events[layer_mask]
                         pre_layer = pre_idx[layer_mask]
                         post_layer = post_idx[layer_mask]
                         delta_layer = delta[layer_mask]
-                        agent_deltas[li].index_put_((batch_layer, pre_layer, post_layer), delta_layer, accumulate=True)
+                        _scatter_updates(delta_layer, batch_layer, pre_layer, post_layer, layer_buffer)
+                    else:
+                        layer_buffer.zero_()
+                    agent_deltas.append(layer_buffer)
 
                 teacher_params = tuple(param.detach().requires_grad_(True) for param in network.parameters())
 
@@ -304,9 +406,6 @@ def run_grad(args, logger):
                         (teacher_deltas_log[li], teacher_deltas[li].sum(dim=0, keepdim=True)), dim=0
                     )
 
-                delta_t_values = torch.cat((delta_t_values, _extract_delta_t(states)), dim=0)
-                delta_d_values = torch.cat((delta_d_values, actions.detach()), dim=0)
-
                 total_reward = total_reward + rewards.sum()
                 total_align = total_align + rewards.sum()
                 total_active = total_active + active_ratio
@@ -346,11 +445,6 @@ def run_grad(args, logger):
             if args.log_gradient_stats:
                 logger.info("Gradient alignment mean (train): %.4f", mean_align)
 
-    delta_t_concat = delta_t_values.cpu()
-    delta_d_concat = delta_d_values.cpu()
-    if delta_t_concat.numel() > 0 and delta_d_concat.numel() > 0:
-        plot_delta_t_delta_d(delta_t_concat, delta_d_concat, os.path.join(args.result_dir, "delta_t_delta_d.png"))
-
     weights_after = [w.detach().cpu().clone() for w in network.w_layers]
     for i, (w_before, w_after) in enumerate(zip(weights_before, weights_after)):
         plot_weight_histograms(
@@ -361,3 +455,5 @@ def run_grad(args, logger):
         agent_cat = torch.cat(agent_deltas_log).cpu()
         teacher_cat = torch.cat(teacher_deltas_log).cpu()
         plot_grad_alignment(agent_cat, teacher_cat, os.path.join(args.result_dir, "grad_alignment.png"))
+
+    analyze_stdp_profile(network, actor, critic, train_loader, args, device)

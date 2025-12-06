@@ -25,8 +25,8 @@ def _diehl_cook_forward_script(
     s_exc_prev = torch.zeros_like(v_exc)
     s_inh_prev = torch.zeros_like(v_inh)
 
-    exc_hist: Tuple[Tensor, ...] = ()
-    inh_hist: Tuple[Tensor, ...] = ()
+    exc_spikes = torch.empty((batch_size, w_input_exc.size(1), T), device=input_spikes.device, dtype=dtype)
+    inh_spikes = torch.empty((batch_size, w_inh_exc.size(0), T), device=input_spikes.device, dtype=dtype)
 
     w_inh_exc_masked = torch.relu(w_inh_exc) * inh_exc_mask
 
@@ -39,14 +39,11 @@ def _diehl_cook_forward_script(
         I_inh = weight_ei * s_exc_prev
         v_inh, s_inh = lif_step_script(v_inh, I_inh, inh_params)
 
-        exc_hist = exc_hist + (s_exc,)
-        inh_hist = inh_hist + (s_inh,)
+        exc_spikes[:, :, t] = s_exc
+        inh_spikes[:, :, t] = s_inh
 
         s_exc_prev = s_exc
         s_inh_prev = s_inh
-
-    exc_spikes = torch.stack(exc_hist, dim=2)
-    inh_spikes = torch.stack(inh_hist, dim=2)
 
     return exc_spikes, inh_spikes
 
