@@ -219,11 +219,13 @@ def run_semi(args, logger):
     s_scen = 1.0
     w_clip_min = args.w_clip_min
     w_clip_max = args.w_clip_max
+    saved_batch: Optional[Tuple[torch.Tensor, ...]] = None
     for epoch in range(1, args.num_epochs + 1):
         total_correct = torch.zeros((), device=device)
         total_margin = torch.zeros((), device=device)
         total_reward = torch.zeros((), device=device)
         total_samples = torch.zeros((), device=device)
+        saved_batch = None
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -270,33 +272,53 @@ def run_semi(args, logger):
 
             event_buffer.subsample_per_image(args.events_per_image)
 
-            if len(event_buffer) > 0:
-                states, extras, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
-                # Actor/critic consume weight snapshots stored in extras during gather,
-                # keeping the post-simulation evaluation aligned with the rollout
-                # parameters (Theory.md episodic update assumption).
-                actions, log_probs_old, values_old = _forward_in_event_batches(
-                    actor, critic, states, extras, batch_size=args.event_batch_size
-                )
+            rewards_tensor = r_total.detach()
 
-                returns = r_total.detach()[batch_indices]
-                advantages = returns - values_old.detach()
+            # Reward shifting: use reward R_k to update actions sampled at batch k-1.
+            if saved_batch is not None:
+                (
+                    prev_states,
+                    prev_actions,
+                    prev_log_probs,
+                    prev_values,
+                    prev_extras,
+                    prev_batch_indices,
+                ) = saved_batch
+                returns = rewards_tensor[prev_batch_indices]
+                advantages = returns - prev_values
 
                 ppo_update_events(
                     actor,
                     critic,
-                    states,
-                    extras,
-                    actions.detach(),
-                    log_probs_old.detach(),
+                    prev_states,
+                    prev_extras,
+                    prev_actions,
+                    prev_log_probs,
                     returns.detach(),
                     advantages.detach(),
                     optimizer_actor,
                     optimizer_critic,
                     ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, states.size(0)),
+                    batch_size=min(args.ppo_batch_size, prev_states.size(0)),
                     eps_clip=args.ppo_eps,
                     c_v=1.0,
+                )
+
+            saved_batch = None
+
+            if len(event_buffer) > 0:
+                states, extras, connection_ids, pre_idx, post_idx, batch_indices = event_buffer.flatten()
+                actions, log_probs_old, values_old = _forward_in_event_batches(
+                    actor, critic, states, extras, batch_size=args.event_batch_size
+                )
+
+                saved_batch = (
+                    states.detach(),
+                    actions.detach(),
+                    log_probs_old.detach(),
+                    values_old.detach(),
+                    extras.detach() if extras.numel() > 0 else extras,
+                    batch_indices.detach(),
                 )
 
                 with torch.no_grad():
