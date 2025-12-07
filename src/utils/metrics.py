@@ -41,8 +41,6 @@ def plot_delta_t_delta_d(delta_t: torch.Tensor | np.ndarray, delta_d: torch.Tens
     plt.savefig(out_path)
     plt.close()
 
-    np.savez(base.with_suffix(".npz"), delta_t=dt_np, delta_d=dd_np)
-
     with (base.with_name(base.name + "_metrics.txt")).open("w") as f:
         corr = np.corrcoef(dt_np, dd_np)[0, 1] if dt_np.size > 1 else float("nan")
         f.write(f"count\t{dt_np.size}\n")

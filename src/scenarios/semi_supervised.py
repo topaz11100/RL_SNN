@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Tuple
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
@@ -14,7 +15,7 @@ from snn.lif import LIFParams
 from snn.network_semi_supervised import SemiSupervisedNetwork
 from utils.event_utils import gather_events
 from utils.logging import resolve_path
-from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
+from utils.metrics import plot_weight_histograms
 
 
 def _ensure_metrics_file(path: str | Path, header: str) -> None:
@@ -112,11 +113,11 @@ def analyze_stdp_profile(
     network: SemiSupervisedNetwork,
     actor: GaussianPolicy,
     critic: ValueFunction,
-    loader,
     args,
     device: torch.device,
 ) -> None:
     result_dir = resolve_path(args.result_dir)
+    result_dir.mkdir(parents=True, exist_ok=True)
     network_state = network.training
     actor_state = actor.training
     critic_state = critic.training
@@ -124,60 +125,38 @@ def analyze_stdp_profile(
     actor.eval()
     critic.eval()
 
-    try:
-        images, _, _ = next(iter(loader))
-    except StopIteration:
-        return
+    dt_range = torch.arange(-50, 51, device=device)
+    window_size = args.spike_array_len
+    states = torch.zeros((len(dt_range), 2, window_size), device=device)
+    center = window_size // 2
+    states[:, 1, center] = 1.0
+    for idx, dt in enumerate(dt_range):
+        pre_idx = center + int(dt.item())
+        if 0 <= pre_idx < window_size:
+            states[idx, 0, pre_idx] = 1.0
 
-    estimated_events = (
-        args.batch_size_images * args.spike_array_len * (network.n_input + network.n_hidden + network.n_output)
-    )
-    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+    weights_to_test = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    dt_cpu = dt_range.cpu().numpy()
+    curves: list[tuple[float, torch.Tensor]] = []
 
     with torch.no_grad():
-        images = images.to(device, non_blocking=True)
-        input_spikes = poisson_encode(images, args.T_semi, max_rate=args.max_rate)
-        hidden_spikes, output_spikes, _ = network(input_spikes)
+        for w_val in weights_to_test:
+            extras = torch.zeros((len(dt_range), actor.extra_feature_dim), device=device)
+            extras[:, 0] = w_val
+            actions, _, _ = actor(states, extras)
+            curves.append((w_val, actions.detach().cpu().view(-1)))
 
-        event_buffer.reset()
-        padded_cache = {}
-
-        def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
-            key = id(spikes)
-            if key not in padded_cache:
-                padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
-            return padded_cache[key]
-
-        gather_events(
-            input_spikes,
-            hidden_spikes,
-            network.w_input_hidden,
-            args.spike_array_len,
-            event_buffer,
-            0,
-            padded_pre=_get_padded(input_spikes),
-            padded_post=_get_padded(hidden_spikes),
-        )
-        gather_events(
-            hidden_spikes,
-            output_spikes,
-            network.w_hidden_output,
-            args.spike_array_len,
-            event_buffer,
-            1,
-            padded_pre=_get_padded(hidden_spikes),
-            padded_post=_get_padded(output_spikes),
-        )
-
-        if len(event_buffer) > 0:
-            states, extras, *_ = event_buffer.flatten()
-            actions, _, _ = _forward_in_event_batches(
-                actor, critic, states, extras, batch_size=args.event_batch_size
-            )
-            delta_t = _extract_delta_t(states).cpu()
-            delta_d = actions.detach().cpu()
-            if delta_t.numel() > 0 and delta_d.numel() > 0:
-                plot_delta_t_delta_d(delta_t, delta_d, result_dir / "delta_t_delta_d.png")
+    plt.figure(figsize=(8, 6), dpi=200)
+    for w_val, action_vals in curves:
+        plt.plot(dt_cpu, action_vals.numpy(), label=f"w={w_val}")
+    plt.title("Learned STDP Profile by Weight")
+    plt.xlabel("Delta t (steps)")
+    plt.ylabel("Delta w (Action)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(result_dir / "stdp_profile_sweep.png")
+    plt.close()
 
     if network_state:
         network.train()
@@ -371,4 +350,4 @@ def run_semi(args, logger):
     plot_weight_histograms(w_input_hidden_before, network.w_input_hidden.detach().cpu(), result_dir / "hist_input_hidden.png")
     plot_weight_histograms(w_hidden_output_before, network.w_hidden_output.detach().cpu(), result_dir / "hist_hidden_output.png")
 
-    analyze_stdp_profile(network, actor, critic, train_loader, args, device)
+    analyze_stdp_profile(network, actor, critic, args, device)
