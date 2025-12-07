@@ -5,7 +5,6 @@ from torch import Tensor, nn
 
 from snn.lif import LIFParams, lif_dynamics_bptt
 
-
 def _grad_mimicry_forward(
     input_spikes: Tensor,
     w_layers: List[Tensor],
@@ -24,29 +23,38 @@ def _grad_mimicry_forward(
     s_prev = [torch.zeros((batch_size, h), device=device, dtype=dtype) for h in hidden_sizes]
     v_output = torch.full((batch_size, w_layers[-1].size(1)), output_params.v_rest, device=device, dtype=dtype)
 
+    # --- [수정 1] 미리 할당(torch.empty) 제거 및 리스트 초기화 ---
+    # In-place 에러 방지를 위해 값을 모을 리스트 생성
+    hidden_spikes_storage = [[] for _ in hidden_sizes] # 각 히든 레이어별 스파이크 리스트
+    output_spikes_storage = []                         # 출력층 스파이크 리스트
+    # --------------------------------------------------------
+
     if T == 0:
+        # T=0 예외 처리는 기존 유지 (반환 타입만 맞춰줌)
         empty_hidden = [torch.empty((batch_size, h, 0), device=device, dtype=dtype) for h in hidden_sizes]
         empty_output = torch.empty((batch_size, w_layers[-1].size(1), 0), device=device, dtype=dtype)
         firing_rates = torch.zeros((batch_size, w_layers[-1].size(1)), device=device, dtype=dtype)
         return empty_hidden, empty_output, firing_rates
 
-    hidden_spikes_tensor = [torch.empty((batch_size, h, T), device=device, dtype=dtype) for h in hidden_sizes]
-    output_spikes = torch.empty((batch_size, w_layers[-1].size(1), T), device=device, dtype=dtype)
-
     relu_w0 = torch.relu(w_layers[0])
     current_input_all = torch.matmul(input_spikes.permute(0, 2, 1), relu_w0)
 
+    # 히든 레이어가 없는 경우 (0 hidden layers)
     if n_hidden_layers == 0:
         for t in range(T):
             current_out = current_input_all[:, t, :]
             v_output, s_output = lif_dynamics_bptt(
                 v_output, current_out, output_params, slope=surrogate_slope
             )
-            output_spikes[:, :, t] = s_output
-
+            # [수정 2] 인덱싱 할당(=) 대신 append 사용
+            output_spikes_storage.append(s_output)
+        
+        # [수정 3] 리스트를 텐서로 변환 (Stack)
+        output_spikes = torch.stack(output_spikes_storage, dim=2)
         firing_rates = output_spikes.mean(dim=2)
         return [], output_spikes, firing_rates
 
+    # 히든 레이어가 있는 경우 (Main Loop)
     for t in range(T):
         current_first = current_input_all[:, t, :]
         v_states[0], s_first = lif_dynamics_bptt(
@@ -54,9 +62,10 @@ def _grad_mimicry_forward(
         )
 
         s_current: List[Tensor] = []
-
         s_current.append(s_first)
-        hidden_spikes_tensor[0][:, :, t] = s_first
+        
+        # [수정 4] 첫 번째 히든 레이어 스파이크 저장 (append)
+        hidden_spikes_storage[0].append(s_first)
 
         for li in range(1, n_hidden_layers):
             current_hidden = torch.matmul(s_prev[li - 1], torch.relu(w_layers[li]))
@@ -64,7 +73,9 @@ def _grad_mimicry_forward(
                 v_states[li], current_hidden, hidden_params, slope=surrogate_slope
             )
             s_current.append(s_next)
-            hidden_spikes_tensor[li][:, :, t] = s_next
+            
+            # [수정 5] 이후 히든 레이어 스파이크 저장 (append)
+            hidden_spikes_storage[li].append(s_next)
 
         prev_spikes_for_output = s_prev[-1]
         current_out = torch.matmul(prev_spikes_for_output, torch.relu(w_layers[-1]))
@@ -72,11 +83,17 @@ def _grad_mimicry_forward(
             v_output, current_out, output_params, slope=surrogate_slope
         )
 
-        output_spikes[:, :, t] = s_output
+        # [수정 6] 출력 스파이크 저장 (append)
+        output_spikes_storage.append(s_output)
 
         s_prev = s_current
 
-    hidden_spikes = hidden_spikes_tensor
+    # --- [수정 7] 최종 텐서 변환 (Stack) ---
+    # 리스트에 모인 (Batch, Neuron) 텐서들을 시간축(dim=2)으로 쌓음
+    hidden_spikes = [torch.stack(s_list, dim=2) for s_list in hidden_spikes_storage]
+    output_spikes = torch.stack(output_spikes_storage, dim=2)
+    # ------------------------------------
+
     firing_rates = output_spikes.mean(dim=2)
     return hidden_spikes, output_spikes, firing_rates
 
