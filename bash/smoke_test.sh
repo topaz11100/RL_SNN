@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUN_BASE="smoke_small_$(date +%Y%m%d_%H%M%S)"
-LOG_DIR="log"
-mkdir -p "${LOG_DIR}"
+LOG_DIR="${PROJECT_ROOT}/logs"
+RESULTS_DIR="${PROJECT_ROOT}/results"
+
+mkdir -p "${LOG_DIR}" "${RESULTS_DIR}"
 
 echo "Run base: ${RUN_BASE}"
-echo "Logs in: ${LOG_DIR}/<scenario>_${RUN_BASE}.log"
+echo "Logs in: ${LOG_DIR}/<scenario>/${RUN_BASE}/log.txt and ${LOG_DIR}/<scenario>_${RUN_BASE}.log"
+echo "Results in: ${RESULTS_DIR}/<scenario>/${RUN_BASE}"
 echo
 
 run_one() {
@@ -19,7 +24,7 @@ run_one() {
 
   # 여기서만 -e를 잠시 끄고 파이썬 실행
   set +e
-  python main.py \
+  PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}" python "${PROJECT_ROOT}/src/main.py" \
     --scenario "${scenario}" \
     --run-name "${run_name}" \
     --num-epochs 1 \
