@@ -81,7 +81,9 @@ class DiehlCookNetwork(nn.Module):
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
 
         # Optimized: use scripted functional core for fused time-loop on GPU/CPU.
-        w_inh_exc_masked = self.w_inh_exc * self.inh_exc_mask
+        # Inhibitory connections use magnitude-only weights to guarantee that inhibitory
+        # spikes decrease the postsynaptic potential regardless of the provided sign.
+        w_inh_exc_masked = self.w_inh_exc.abs() * self.inh_exc_mask
         return _diehl_cook_forward_script(
             input_spikes,
             self.w_input_exc,
