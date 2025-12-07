@@ -229,6 +229,8 @@ def run_unsup1(args, logger):
         total_stab = torch.zeros((), device=device)
         total_reward_sum = torch.zeros((), device=device)
         total_samples = torch.zeros((), device=device)
+        saved_batch = None
+
         for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             indices = indices.to(device, non_blocking=True)
@@ -301,9 +303,42 @@ def run_unsup1(args, logger):
             total_stab = total_stab + r_stab.sum()
             total_reward_sum = total_reward_sum + total_reward.sum()
 
+            rewards_tensor = total_reward.detach()
+
+            # Reward shifting: R_k updates the action sampled for batch k-1, since A_k
+            # influences the next rollout's dynamics. This preserves causal credit
+            # assignment between actions and resulting rewards.
+            if saved_batch is not None:
+                (
+                    prev_states,
+                    prev_actions,
+                    prev_log_probs,
+                    prev_values,
+                    prev_extras,
+                    prev_batch_idx_events,
+                ) = saved_batch
+                returns = rewards_tensor[prev_batch_idx_events]
+                advantages = returns - prev_values
+
+                ppo_update_events(
+                    actor,
+                    critic,
+                    prev_states,
+                    prev_extras,
+                    prev_actions,
+                    prev_log_probs,
+                    returns.detach(),
+                    advantages.detach(),
+                    optimizer_actor,
+                    optimizer_critic,
+                    ppo_epochs=args.ppo_epochs,
+                    batch_size=min(args.ppo_batch_size, prev_states.size(0)),
+                    eps_clip=args.ppo_eps,
+                    c_v=1.0,
+                )
+
             if len(event_buffer) > 0:
                 states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
-                rewards_tensor = total_reward.detach()
 
                 # Extras already contain the weight snapshot captured during gather_events,
                 # aligning the Actor input with the simulation-time parameters (Theory 2.x on
@@ -311,28 +346,21 @@ def run_unsup1(args, logger):
                 actions, log_probs_old, values_old = _forward_in_event_batches(
                     actor, critic, states, extras, batch_size=args.event_batch_size
                 )
-                returns = rewards_tensor[batch_idx_events]
-                advantages = returns - values_old.detach()
 
-                ppo_update_events(
-                    actor,
-                    critic,
-                    states,
-                    extras,
+                # Save the current batch to update when the next reward becomes available.
+                saved_batch = (
+                    states.detach(),
                     actions.detach(),
                     log_probs_old.detach(),
-                    returns.detach(),
-                    advantages.detach(),
-                    optimizer_actor,
-                    optimizer_critic,
-                    ppo_epochs=args.ppo_epochs,
-                    batch_size=min(args.ppo_batch_size, states.size(0)),
-                    eps_clip=args.ppo_eps,
-                    c_v=1.0,
+                    values_old.detach(),
+                    extras.detach() if extras.numel() > 0 else extras,
+                    batch_idx_events.detach(),
                 )
 
                 delta = args.local_lr * s_scen * actions.detach()
                 _apply_weight_updates(delta, connection_ids, pre_idx, post_idx, network, args)
+            else:
+                saved_batch = None
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
