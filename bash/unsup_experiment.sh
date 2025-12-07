@@ -18,9 +18,10 @@ rho_target=$max_rate
 divergence=0.4
 stability=0.3
 
-N_E=400
+N_E=200
 
-img_batch=16
+img_batch=1
+ppo_batch=256
 epoch=2
 seed=0
 
@@ -50,6 +51,7 @@ for sc in "${scenario[@]}"; do
             --scenario "$sc" \
             --seed "$seed" \
             --batch-size-images "$img_batch" \
+            --ppo-batch-size "$ppo_batch"\
             --num-epochs "$epoch" \
             --T-unsup1 "$timestep" \
             --T-unsup2 "$timestep" \
