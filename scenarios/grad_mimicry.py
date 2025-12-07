@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
+from torch.func import functional_call, grad, vmap
 
 from data.mnist import get_mnist_dataloaders
 from rl.buffers import EventBatchBuffer
@@ -229,6 +230,13 @@ def run_grad(args, logger):
     weights_before = [w.detach().cpu().clone() for w in network.w_layers]
     total_synapses = sum(w.numel() for w in network.w_layers)
 
+    def compute_loss_stateless(params, buffers, x, y):
+        _, _, firing_rates = functional_call(network, (params, buffers), (x.unsqueeze(0),))
+        logits = firing_rates * 5.0
+        return F.cross_entropy(logits, y.unsqueeze(0))
+
+    per_sample_grads_fn = vmap(grad(compute_loss_stateless), in_dims=(None, None, 0, 0))
+
     s_scen = 1.0
     ones_scalar = torch.tensor(1.0, device=device)
     for epoch in range(1, args.num_epochs + 1):
@@ -315,25 +323,17 @@ def run_grad(args, logger):
                         layer_buffer.zero_()
                     agent_deltas.append(layer_buffer)
 
-                logits = firing_rates * 5.0
-                losses = F.cross_entropy(logits, labels, reduction="none")
-
                 teacher_deltas: list[torch.Tensor] = [torch.zeros_like(agent_deltas[li]) for li in range(num_layers)]
 
-                for sample_idx in range(batch_size):
-                    retain = sample_idx < batch_size - 1
-                    grads = torch.autograd.grad(
-                        losses[sample_idx],
-                        network.w_layers,
-                        retain_graph=retain,
-                        allow_unused=True,
-                    )
-                    for li, grad in enumerate(grads):
-                        if grad is None:
-                            grad_fill = torch.zeros_like(network.w_layers[li])
-                        else:
-                            grad_fill = grad
-                        teacher_deltas[li][sample_idx].copy_(-args.alpha_align * grad_fill.detach())
+                params = dict(network.named_parameters())
+                buffers = dict(network.named_buffers())
+                grad_dict = per_sample_grads_fn(params, buffers, input_spikes, labels)
+
+                for li in range(num_layers):
+                    grad_batch = grad_dict.get(f"w_layers.{li}")
+                    if grad_batch is None:
+                        grad_batch = torch.zeros_like(teacher_deltas[li])
+                    teacher_deltas[li].copy_(-args.alpha_align * grad_batch.detach())
 
                 acc_dtype = agent_deltas[0].dtype
                 squared_error_sum = torch.zeros(batch_size, device=device, dtype=acc_dtype)
