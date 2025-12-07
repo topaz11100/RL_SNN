@@ -249,7 +249,10 @@ def run_grad(args, logger):
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
+            if args.direct_input:
+                input_spikes = images.view(images.size(0), -1).unsqueeze(-1).expand(-1, -1, args.T_sup)
+            else:
+                input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
 
             hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
 

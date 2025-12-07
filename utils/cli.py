@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha-align", type=float, default=0.1, help="Alignment step size for gradient mimicry")
     parser.add_argument("--max-rate", type=float, default=1.0, help="Maximal firing rate for Poisson encoder")
     parser.add_argument(
+        "--direct-input",
+        action="store_true",
+        help="If set, feed real-valued inputs (currents) instead of Poisson spikes in grad scenario",
+    )
+    parser.add_argument(
         "--log-gradient-stats",
         action="store_true",
         help="Enable extended logging of gradient/Δw statistics in grad mimicry scenario",
