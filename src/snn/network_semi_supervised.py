@@ -26,13 +26,13 @@ def _semi_supervised_forward_script(
     hidden_spikes = torch.empty((batch_size, w_input_hidden.size(1), T), device=input_spikes.device, dtype=dtype)
     output_spikes = torch.empty((batch_size, w_hidden_output.size(1), T), device=input_spikes.device, dtype=dtype)
 
-    I_hidden_all = torch.matmul(input_spikes.permute(0, 2, 1), torch.relu(w_input_hidden))
+    I_hidden_all = torch.matmul(input_spikes.permute(0, 2, 1), w_input_hidden)
 
     for t in range(T):
         I_hidden = I_hidden_all[:, t, :]
         v_hidden, s_hidden = lif_step_script(v_hidden, I_hidden, hidden_params)
 
-        I_output = torch.matmul(s_hidden_prev, torch.relu(w_hidden_output))
+        I_output = torch.matmul(s_hidden_prev, w_hidden_output)
         v_output, s_output = lif_step_script(v_output, I_output, output_params)
 
         hidden_spikes[:, :, t] = s_hidden

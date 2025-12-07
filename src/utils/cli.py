@@ -76,6 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upper bound for excitatory synapse weights",
     )
     parser.add_argument(
+        "--grad-clip-min",
+        type=float,
+        default=0.0,
+        help="Lower bound for supervised/semi-supervised weight updates",
+    )
+    parser.add_argument(
+        "--grad-clip-max",
+        type=float,
+        default=1.0,
+        help="Upper bound for supervised/semi-supervised weight updates",
+    )
+    parser.add_argument(
         "--inh-clip-min",
         type=float,
         default=0.0,
