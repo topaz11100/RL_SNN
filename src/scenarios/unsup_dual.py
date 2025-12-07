@@ -184,7 +184,7 @@ def analyze_stdp_profile(
             exc_mask = connection_ids == 0
             inh_mask = connection_ids == 1
 
-            if exc_mask.any():
+            if exc_mask.sum() > 1:
                 actions_exc, _, _ = _forward_in_event_batches(
                     actor_exc,
                     critic_exc,
@@ -194,7 +194,7 @@ def analyze_stdp_profile(
                 )
                 _plot(_extract_delta_t(states[exc_mask]), actions_exc.detach(), "delta_t_delta_d_exc.png")
 
-            if inh_mask.any():
+            if inh_mask.sum() > 1:
                 actions_inh, _, _ = _forward_in_event_batches(
                     actor_inh,
                     critic_inh,

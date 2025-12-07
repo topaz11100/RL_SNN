@@ -81,7 +81,7 @@ def ppo_update_events(
     log_probs_old = log_probs_old.detach()
     actions_old = actions_old.detach()
     num_samples = states.size(0)
-    if num_samples == 0:
+    if num_samples <= 1:
         return
     extras_available = extras.numel() > 0
 

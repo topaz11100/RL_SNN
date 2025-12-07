@@ -262,7 +262,7 @@ def run_grad(args, logger):
         for batch_idx, (images, labels, _) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            if args.direct_input:
+            if args.sup_input_encoding == "direct":
                 # Scale input current by max_rate to match the dynamics of the Poisson case
                 input_spikes = (images.view(images.size(0), -1) * args.max_rate).unsqueeze(-1).expand(-1, -1, args.T_sup)
             else:
@@ -273,9 +273,9 @@ def run_grad(args, logger):
             grad_dict, auxiliaries = per_sample_grads_fn(params, buffers, input_spikes, labels)
             hidden_spikes_list_batched, output_spikes_batched, firing_rates_batched = auxiliaries
 
-            hidden_spikes_list = [spikes.squeeze(1) for spikes in hidden_spikes_list_batched]
-            output_spikes = output_spikes_batched.squeeze(1)
-            firing_rates = firing_rates_batched.squeeze(1)
+            hidden_spikes_list = [spikes.squeeze(1).detach() for spikes in hidden_spikes_list_batched]
+            output_spikes = output_spikes_batched.squeeze(1).detach()
+            firing_rates = firing_rates_batched.squeeze(1).detach()
 
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
@@ -406,9 +406,12 @@ def run_grad(args, logger):
                         network.w_layers[li].add_(update_mat)
                         network.w_layers[li].clamp_(w_clip_min, w_clip_max)
 
-                for li in range(num_layers):
-                    agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach())
-                    teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach())
+                # [수정] RAM 폭발 방지: 매 배치가 아니라 로그 주기(log_interval)마다만 저장
+                if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                    for li in range(num_layers):
+                        # GPU 메모리 누수 방지를 위해 .cpu() 로 옮겨서 저장
+                        agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
+                        teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach().cpu())
 
                 total_reward = total_reward + rewards.sum()
                 total_align = total_align + rewards.sum()
@@ -420,6 +423,14 @@ def run_grad(args, logger):
                 total_align = total_align + zero_reward_sum
                 total_active = total_active + torch.zeros((), device=device)
                 active_batches = active_batches + ones_scalar
+
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                batch_acc = (preds == labels).float().mean().item()
+                batch_rew = rewards.mean().item()
+                logger.info(
+                    "Epoch %d | Batch %d/%d | Acc %.4f | Reward %.4f | Active %.4f",
+                    epoch, batch_idx, len(train_loader), batch_acc, batch_rew, active_ratio.item()
+                )
 
         mean_acc = (total_correct / total_samples).item() if total_samples.item() > 0 else 0.0
         mean_reward = (total_reward / total_samples).item() if total_samples.item() > 0 else 0.0

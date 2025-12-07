@@ -120,6 +120,7 @@ def analyze_stdp_profile(
     args,
     device: torch.device,
 ) -> None:
+    result_dir = resolve_path(args.result_dir)
     network_was_training = network.training
     actor_was_training = actor.training
     critic_was_training = critic.training

@@ -335,6 +335,14 @@ def run_semi(args, logger):
             total_margin = total_margin + r_margin.sum()
             total_reward = total_reward + r_total.sum()
 
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                batch_acc = (preds == labels).float().mean().item()
+                batch_rew = r_total.mean().item()
+                logger.info(
+                    "Epoch %d | Batch %d/%d | Acc %.4f | Reward %.4f",
+                    epoch, batch_idx, len(train_loader), batch_acc, batch_rew
+                )
+
         mean_acc = (total_correct / total_samples).item() if total_samples.item() > 0 else 0.0
         mean_margin = (total_margin / total_samples).item() if total_samples.item() > 0 else 0.0
         mean_reward = (total_reward / total_samples).item() if total_samples.item() > 0 else 0.0
