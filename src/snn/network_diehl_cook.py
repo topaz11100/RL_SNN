@@ -28,7 +28,7 @@ def _diehl_cook_forward_script(
     exc_spikes = torch.empty((batch_size, w_input_exc.size(1), T), device=input_spikes.device, dtype=dtype)
     inh_spikes = torch.empty((batch_size, w_inh_exc.size(0), T), device=input_spikes.device, dtype=dtype)
 
-    I_exc_all = torch.matmul(input_spikes.permute(0, 2, 1), torch.relu(w_input_exc))
+    I_exc_all = torch.matmul(input_spikes.permute(0, 2, 1), w_input_exc)
 
     for t in range(T):
         I_exc = I_exc_all[:, t, :] - torch.matmul(s_inh_prev, w_inh_exc_masked)
@@ -80,7 +80,7 @@ class DiehlCookNetwork(nn.Module):
             raise ValueError(f"input_spikes must have shape (batch, {self.n_input}, T)")
 
         # Optimized: use scripted functional core for fused time-loop on GPU/CPU.
-        w_inh_exc_masked = torch.relu(self.w_inh_exc) * self.inh_exc_mask
+        w_inh_exc_masked = self.w_inh_exc * self.inh_exc_mask
         return _diehl_cook_forward_script(
             input_spikes,
             self.w_input_exc,

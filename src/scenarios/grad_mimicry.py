@@ -393,7 +393,7 @@ def run_grad(args, logger):
                     for li in range(num_layers):
                         update_mat = agent_deltas[li].sum(dim=0)
                         network.w_layers[li].add_(update_mat)
-                        network.w_layers[li].clamp_(args.exc_clip_min, args.exc_clip_max)
+                        network.w_layers[li].clamp_(args.grad_clip_min, args.grad_clip_max)
 
                 for li in range(num_layers):
                     agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
