@@ -255,12 +255,16 @@ def run_unsup2(args, logger):
     s_scen = 1.0
     pos_reward = torch.tensor(1.0, device=device)
     neg_reward = torch.tensor(-1.0, device=device)
+    saved_batch_exc: Optional[Tuple[torch.Tensor, ...]] = None
+    saved_batch_inh: Optional[Tuple[torch.Tensor, ...]] = None
     for epoch in range(1, args.num_epochs + 1):
         total_sparse = torch.zeros((), device=device)
         total_div = torch.zeros((), device=device)
         total_stab = torch.zeros((), device=device)
         total_reward_sum = torch.zeros((), device=device)
         total_samples = torch.zeros((), device=device)
+        saved_batch_exc = None
+        saved_batch_inh = None
         for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             indices = indices.to(device, non_blocking=True)
@@ -334,9 +338,73 @@ def run_unsup2(args, logger):
             total_stab = total_stab + r_stab.sum()
             total_reward_sum = total_reward_sum + total_reward.sum()
 
+            rewards_tensor = total_reward.detach()
+
+            # Reward shifting: use the reward observed at batch k to update the
+            # actions sampled at batch k-1, preserving causal credit assignment.
+            if saved_batch_exc is not None:
+                (
+                    prev_states_exc,
+                    prev_actions_exc,
+                    prev_logp_exc,
+                    prev_values_exc,
+                    prev_extras_exc,
+                    prev_batch_exc_events,
+                ) = saved_batch_exc
+                returns_exc = rewards_tensor[prev_batch_exc_events]
+                adv_exc = returns_exc - prev_values_exc
+
+                ppo_update_events(
+                    actor_exc,
+                    critic_exc,
+                    prev_states_exc,
+                    prev_extras_exc,
+                    prev_actions_exc,
+                    prev_logp_exc,
+                    returns_exc.detach(),
+                    adv_exc.detach(),
+                    optimizer_actor_exc,
+                    optimizer_critic_exc,
+                    ppo_epochs=args.ppo_epochs,
+                    batch_size=min(args.ppo_batch_size, prev_states_exc.size(0)),
+                    eps_clip=args.ppo_eps,
+                    c_v=1.0,
+                )
+
+            if saved_batch_inh is not None:
+                (
+                    prev_states_inh,
+                    prev_actions_inh,
+                    prev_logp_inh,
+                    prev_values_inh,
+                    prev_extras_inh,
+                    prev_batch_inh_events,
+                ) = saved_batch_inh
+                returns_inh = rewards_tensor[prev_batch_inh_events]
+                adv_inh = returns_inh - prev_values_inh
+
+                ppo_update_events(
+                    actor_inh,
+                    critic_inh,
+                    prev_states_inh,
+                    prev_extras_inh,
+                    prev_actions_inh,
+                    prev_logp_inh,
+                    returns_inh.detach(),
+                    adv_inh.detach(),
+                    optimizer_actor_inh,
+                    optimizer_critic_inh,
+                    ppo_epochs=args.ppo_epochs,
+                    batch_size=min(args.ppo_batch_size, prev_states_inh.size(0)),
+                    eps_clip=args.ppo_eps,
+                    c_v=1.0,
+                )
+
+            saved_batch_exc = None
+            saved_batch_inh = None
+
             if len(event_buffer) > 0:
                 states, extras, connection_ids, pre_idx, post_idx, batch_idx_events = event_buffer.flatten()
-                rewards_tensor = total_reward.detach()
 
                 # Excitatory pathway
                 exc_mask = connection_ids == 0
@@ -346,9 +414,6 @@ def run_unsup2(args, logger):
                     batch_exc_events = batch_idx_events[exc_mask]
                     pre_exc_events = pre_idx[exc_mask]
                     post_exc_events = post_idx[exc_mask]
-                    # Actor sees extras built from the simulation-time weights captured
-                    # in gather_events, ensuring on-policy consistency when evaluating
-                    # actions after the episode rollout.
                     actions_exc, logp_exc, values_exc = _forward_in_event_batches(
                         actor_exc,
                         critic_exc,
@@ -356,30 +421,22 @@ def run_unsup2(args, logger):
                         extras_exc,
                         batch_size=args.event_batch_size,
                     )
-                    returns_exc = rewards_tensor[batch_exc_events]
-                    adv_exc = returns_exc - values_exc.detach()
 
-                    ppo_update_events(
-                        actor_exc,
-                        critic_exc,
-                        states_exc,
-                        extras_exc,
+                    saved_batch_exc = (
+                        states_exc.detach(),
                         actions_exc.detach(),
                         logp_exc.detach(),
-                        returns_exc.detach(),
-                        adv_exc.detach(),
-                        optimizer_actor_exc,
-                        optimizer_critic_exc,
-                        ppo_epochs=args.ppo_epochs,
-                        batch_size=min(args.ppo_batch_size, states_exc.size(0)),
-                        eps_clip=args.ppo_eps,
-                        c_v=1.0,
+                        values_exc.detach(),
+                        extras_exc.detach() if extras_exc.numel() > 0 else extras_exc,
+                        batch_exc_events.detach(),
                     )
 
                     with torch.no_grad():
                         delta_exc = args.local_lr * s_scen * actions_exc.detach()
                         _scatter_updates(delta_exc, pre_exc_events, post_exc_events, network.w_input_exc)
                         network.w_input_exc.clamp_(args.exc_clip_min, args.exc_clip_max)
+                else:
+                    saved_batch_exc = None
 
                 # Inhibitory pathway
                 inh_mask = connection_ids == 1
@@ -396,24 +453,14 @@ def run_unsup2(args, logger):
                         extras_inh,
                         batch_size=args.event_batch_size,
                     )
-                    returns_inh = rewards_tensor[batch_inh_events]
-                    adv_inh = returns_inh - values_inh.detach()
 
-                    ppo_update_events(
-                        actor_inh,
-                        critic_inh,
-                        states_inh,
-                        extras_inh,
+                    saved_batch_inh = (
+                        states_inh.detach(),
                         actions_inh.detach(),
                         logp_inh.detach(),
-                        returns_inh.detach(),
-                        adv_inh.detach(),
-                        optimizer_actor_inh,
-                        optimizer_critic_inh,
-                        ppo_epochs=args.ppo_epochs,
-                        batch_size=min(args.ppo_batch_size, states_inh.size(0)),
-                        eps_clip=args.ppo_eps,
-                        c_v=1.0,
+                        values_inh.detach(),
+                        extras_inh.detach() if extras_inh.numel() > 0 else extras_inh,
+                        batch_inh_events.detach(),
                     )
 
                     with torch.no_grad():
@@ -426,6 +473,8 @@ def run_unsup2(args, logger):
                             valid_mask=network.inh_exc_mask,
                         )
                         network.w_inh_exc.clamp_(args.inh_clip_min, args.inh_clip_max)
+                else:
+                    saved_batch_inh = None
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 logger.info(
