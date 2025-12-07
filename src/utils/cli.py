@@ -22,6 +22,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1024,
         help="Mini-batch size for processing flattened events with the actor/critic",
     )
+    parser.add_argument(
+        "--events-per-image",
+        type=int,
+        default=1024,
+        help="Maximum number of events to sample per image (K) for PPO updates",
+    )
     parser.add_argument("--run-name", type=str, default=None, help="Name for the current run / result directory")
     parser.add_argument(
         "--log-interval",
@@ -76,13 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upper bound for excitatory synapse weights (unsupervised scenarios)",
     )
     parser.add_argument(
-        "--grad-clip-min",
+        "--w-clip-min",
         type=float,
         default=0.0,
         help="Lower bound for supervised/semi-supervised weights (values)",
     )
     parser.add_argument(
-        "--grad-clip-max",
+        "--w-clip-max",
         type=float,
         default=1.0,
         help="Upper bound for supervised/semi-supervised weights (values)",

@@ -202,6 +202,47 @@ class EventBatchBuffer:
         batch_idx = self.batch_indices[: self.length]
         return states, extras, connection_ids, pre_idx, post_idx, batch_idx
 
+    def subsample_per_image(self, k: int) -> None:
+        """Reservoir-style subsampling to keep at most ``k`` events per image.
+
+        This enforces the per-image cap described in Theory 2.9.3 to prevent
+        oversized PPO updates. The operation is in-place and keeps storage
+        allocation intact for reuse across batches.
+        """
+
+        if self.states is None or self.length == 0:
+            return
+
+        if k <= 0:
+            self.length = 0
+            return
+
+        batch_idx = self.batch_indices[: self.length]
+        unique_batches = torch.unique(batch_idx)
+
+        keep_mask = torch.zeros(self.length, device=batch_idx.device, dtype=torch.bool)
+        for b in unique_batches:
+            indices = (batch_idx == b).nonzero(as_tuple=False).squeeze(1)
+            if indices.numel() > k:
+                perm = torch.randperm(indices.numel(), device=batch_idx.device)[:k]
+                indices = indices[perm]
+            keep_mask[indices] = True
+
+        keep_indices = keep_mask.nonzero(as_tuple=False).squeeze(1)
+        new_length = keep_indices.numel()
+        if new_length == self.length:
+            return
+
+        self.states[:new_length].copy_(self.states[keep_indices])
+        if self.extras is not None:
+            self.extras[:new_length].copy_(self.extras[keep_indices])
+        self.batch_indices[:new_length].copy_(self.batch_indices[keep_indices])
+        self.connection_ids[:new_length].copy_(self.connection_ids[keep_indices])
+        self.pre_indices[:new_length].copy_(self.pre_indices[keep_indices])
+        self.post_indices[:new_length].copy_(self.post_indices[keep_indices])
+
+        self.length = new_length
+
     def reset(self) -> None:
         """Reuse the allocated storage without freeing GPU memory."""
         self.length = 0

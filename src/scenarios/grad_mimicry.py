@@ -225,8 +225,8 @@ def run_grad(args, logger):
         torch.zeros((max_batch_size, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
     ]
 
-    grad_clip_min = args.grad_clip_min
-    grad_clip_max = args.grad_clip_max
+    w_clip_min = args.w_clip_min
+    w_clip_max = args.w_clip_max
 
     metrics_train = result_dir / "metrics_train.txt"
     metrics_val = result_dir / "metrics_val.txt"
@@ -310,6 +310,8 @@ def run_grad(args, logger):
                 padded_pre=_get_padded(prev_spikes),
                 padded_post=_get_padded(output_spikes),
             )
+
+            event_buffer.subsample_per_image(args.events_per_image)
 
             rewards = torch.zeros(input_spikes.size(0), device=device)
 
@@ -396,7 +398,7 @@ def run_grad(args, logger):
                     for li in range(num_layers):
                         update_mat = agent_deltas[li].sum(dim=0)
                         network.w_layers[li].add_(update_mat)
-                        network.w_layers[li].clamp_(grad_clip_min, grad_clip_max)
+                        network.w_layers[li].clamp_(w_clip_min, w_clip_max)
 
                 for li in range(num_layers):
                     agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
