@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 from typing import Tuple
 
 import torch
@@ -13,12 +13,15 @@ from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_semi_supervised import SemiSupervisedNetwork
 from utils.event_utils import gather_events
+from utils.logging import resolve_path
 from utils.metrics import plot_delta_t_delta_d, plot_weight_histograms
 
 
-def _ensure_metrics_file(path: str, header: str) -> None:
-    if not os.path.exists(path):
-        with open(path, "w") as f:
+def _ensure_metrics_file(path: str | Path, header: str) -> None:
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w") as f:
             f.write(header + "\n")
 
 
@@ -113,6 +116,7 @@ def analyze_stdp_profile(
     args,
     device: torch.device,
 ) -> None:
+    result_dir = resolve_path(args.result_dir)
     network_state = network.training
     actor_state = actor.training
     critic_state = critic.training
@@ -173,7 +177,7 @@ def analyze_stdp_profile(
             delta_t = _extract_delta_t(states).cpu()
             delta_d = actions.detach().cpu()
             if delta_t.numel() > 0 and delta_d.numel() > 0:
-                plot_delta_t_delta_d(delta_t, delta_d, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+                plot_delta_t_delta_d(delta_t, delta_d, result_dir / "delta_t_delta_d.png")
 
     if network_state:
         network.train()
@@ -187,6 +191,9 @@ def run_semi(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
+    result_dir = resolve_path(args.result_dir)
+    args.result_dir = str(result_dir)
+
     lif_params = LIFParams(dt=args.dt)
     network = SemiSupervisedNetwork(
         n_hidden=args.N_hidden, hidden_params=lif_params, output_params=lif_params
@@ -199,9 +206,9 @@ def run_semi(args, logger):
     w_input_hidden_before = network.w_input_hidden.detach().cpu().clone()
     w_hidden_output_before = network.w_hidden_output.detach().cpu().clone()
 
-    metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
-    metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
-    metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
+    metrics_train = result_dir / "metrics_train.txt"
+    metrics_val = result_dir / "metrics_val.txt"
+    metrics_test = result_dir / "metrics_test.txt"
     _ensure_metrics_file(metrics_train, "epoch\tacc\tmargin\treward")
     _ensure_metrics_file(metrics_val, "epoch\tacc\tmargin\treward")
     _ensure_metrics_file(metrics_test, "epoch\tacc\tmargin\treward")
@@ -327,7 +334,7 @@ def run_semi(args, logger):
                 test_acc,
             )
 
-    plot_weight_histograms(w_input_hidden_before, network.w_input_hidden.detach().cpu(), os.path.join(args.result_dir, "hist_input_hidden.png"))
-    plot_weight_histograms(w_hidden_output_before, network.w_hidden_output.detach().cpu(), os.path.join(args.result_dir, "hist_hidden_output.png"))
+    plot_weight_histograms(w_input_hidden_before, network.w_input_hidden.detach().cpu(), result_dir / "hist_input_hidden.png")
+    plot_weight_histograms(w_hidden_output_before, network.w_hidden_output.detach().cpu(), result_dir / "hist_hidden_output.png")
 
     analyze_stdp_profile(network, actor, critic, train_loader, args, device)

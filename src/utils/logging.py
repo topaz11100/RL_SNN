@@ -1,12 +1,19 @@
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = PROJECT_ROOT / "results"
 LOGS_ROOT = PROJECT_ROOT / "logs"
+
+
+def resolve_path(path: Union[str, Path]) -> Path:
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = PROJECT_ROOT / resolved
+    return resolved.resolve()
 
 
 def create_result_dir(scenario: str, run_name: Optional[str] = None) -> str:

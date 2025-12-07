@@ -1,8 +1,12 @@
+from pathlib import Path
 from typing import Tuple
 
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import datasets, transforms
+
+
+DATA_ROOT = Path(__file__).resolve().parent
 
 
 class _IndexedMNIST(datasets.MNIST):
@@ -18,8 +22,8 @@ def get_mnist_dataloaders(batch_size_images: int, seed: int) -> Tuple[DataLoader
 
     transform = transforms.ToTensor()
 
-    train_val_dataset: Dataset = _IndexedMNIST(root="data", train=True, download=True, transform=transform)
-    test_dataset: Dataset = _IndexedMNIST(root="data", train=False, download=True, transform=transform)
+    train_val_dataset: Dataset = _IndexedMNIST(root=str(DATA_ROOT), train=True, download=True, transform=transform)
+    test_dataset: Dataset = _IndexedMNIST(root=str(DATA_ROOT), train=False, download=True, transform=transform)
 
     val_fraction = 0.1
     val_size = int(len(train_val_dataset) * val_fraction)
