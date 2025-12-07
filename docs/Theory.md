@@ -51,27 +51,45 @@
 
 * 데이터셋은 **MNIST** 를 사용한다.
 * 하나의 에피소드는 이미지 1장을 일정 시간 $T$ 동안 SNN 에 흘렸을 때 생성되는 모든 뉴런 스파이크와 시냅스 이벤트 시퀀스 전체를 의미한다. 편의상 이를 “이미지 1장 = 에피소드 1개” 라고 부른다.
+* 실제 구현에서는 GPU 효율을 위해 여러 이미지를 한 번에 처리하며, 이때 `--batch-size-images` 는 **한 번의 rollout 에서 동시에 시뮬레이션하는 에피소드(이미지)의 개수**를 뜻한다. 각 이미지는 여전히 독립적인 에피소드로 취급되며, 이미지마다 별도의 전역 보상 $R(x)$ 가 계산된다.
 * 각 시나리오마다 **시뮬레이션 타임스텝 수** $T$ 를 별도로 두고 모두 CLI 하이퍼파라미터로 노출한다.
 
-픽셀 값 $x_{p} \in [0,1]$ 에 대해 다음과 같이 **Poisson 인코딩**으로 스파이크를 생성한다.
+#### 2.1.1 Poisson 인코딩 (기본 모드)
 
-* 타임스텝 $t = 1,\dots,T$
-* 픽셀 $p$ 에 대해 스파이크 $s_{p}(t) \in {0,1}$ 를
-  $$
-  P\bigl(s_{p}(t)=1\bigr) = \lambda_{p} \Delta t
-  $$
-  로 두고 샘플링한다. 여기서 $\lambda_{p}$ 는 픽셀 값에 비례하는 발화율이다.
+기본 입력 인코딩은 픽셀 값 $x_{p} \in [0,1]$ 에 비례하는 발화율을 사용하는 **Poisson 인코딩**이다. 타임스텝 $t = 1,\dots,T$, 픽셀 $p$ 에 대해 스파이크 $s_{p}(t) \in \{0,1\}$ 를
 
-정리하면 한 에피소드 동안
+$$
+P\bigl(s_{p}(t)=1\bigr) = \lambda_{p} \Delta t
+$$
 
-1. 이미지 1장을 일정 시간 $T$ 동안 SNN 에 흘려보내며
-2. 발생하는 모든 시냅스 이벤트를 수집하고
-3. 에피소드 전체에 대한 전역 보상 $R$ 을 계산한 뒤
-4. 그 에피소드에서 수집한 궤적을 포함해 RL 업데이트에 사용한다.
+로 두고 샘플링한다. 여기서 $\lambda_{p}$ 는 픽셀 값에 비례하는 발화율이며, $\Delta t$ 는 단위 시간 간격이다.
 
-강화학습 관점에서 에피소드는 항상 **이미지 단위**로 정의된다. 실제 구현에서는 여러 이미지를 한 번에 처리하여 **이미지 단위 미니배치**를 구성하고, 이 미니배치 전체를 대상으로 Actor–Critic 업데이트를 수행할 수 있다. 각 에피소드는 자기 이미지에 대한 전역 보상 $R$ 을 따로 가지므로, 서로 다른 이미지를 같은 미니배치에 포함하더라도 보상의 의미가 희석되지 않고 오히려 gradient 분산이 줄어 학습 안정성이 증가한다.
+요약하면 한 에피소드(이미지 1장)에 대해
+
+1. 이미지를 $T$ 타임스텝 동안 Poisson 인코더를 통해 입력층으로 주입하고
+2. 그 동안 발생하는 모든 시냅스 이벤트를 수집한 뒤
+3. 에피소드 전체에 대한 전역 보상 $R$ 을 계산하고
+4. 수집된 궤적을 사용해 RL 업데이트(PPO)를 수행한다.
+
+이때 여러 이미지를 동시에 처리하더라도, 각 이벤트가 소속된 이미지는 명확히 구분되므로 전역 보상 $R(x)$ 의 의미가 희석되지 않는다. 오히려 여러 에피소드의 이벤트를 함께 사용해 그래디언트를 계산함으로써 **분산이 감소하고 학습 안정성이 증가**한다.
+
+#### 2.1.2 전류 직주입 인코딩 (완전지도 시나리오 전용 선택지)
+
+완전지도 gradient mimic 시나리오(6장)에서는 BPTT 비용과 스파이크 수를 줄이기 위해, 입력층을 **전류 직주입(current injection)** 방식으로 사용할 수 있는 옵션을 추가한다. 이를 위해 CLI 하이퍼파라미터
+
+* `--sup-input-encoding` $\in \{\texttt{poisson}, \texttt{direct}\}$
+
+을 두고,
+
+* `poisson` 선택 시: 위의 Poisson 인코딩을 그대로 사용한다.
+* `direct` 선택 시: 각 픽셀 값 $x_{p}$ 을 비율 상수 $\kappa$ 와 곱한 전류 $I_{p} = \kappa x_{p}$ 를 입력층 뉴런에 **$T_{\text{sup}}$ 타임스텝 동안 고정된 값으로 주입**한다.
+
+직주입 모드에서는 스파이크 생성이 확률적 Poisson 샘플링이 아니라, LIF 방정식에 의해 결정되는 **결정론적(deterministic)** 동역학으로 바뀐다. BPTT 비용은 시뮬레이션 길이 $T_{\text{sup}}$ 에 선형으로 비례하므로, 실제 구현에서는 $T_{\text{sup}}$ 를 비교적 짧게(예: 1–5 스텝) 두는 것을 기본값으로 가정하고, 이를 별도의 CLI 인수(예: `--T-sup`)로 제어한다.
+
+다른 세 시나리오(완전 비지도 2개, 준지도 1개)는 항상 Poisson 인코딩을 사용하며, 완전지도 시나리오에서만 `--sup-input-encoding` 으로 입력 인코딩 방식을 선택할 수 있다.
 
 ### 2.2 LIF 뉴런과 스파이크 히스토리
+
 
 모든 SNN 뉴런은 표준 **Leaky Integrate-and-Fire (LIF)** 모델을 따른다. 막전위 $v(t)$ 에 대해
 
@@ -221,13 +239,29 @@ $$
 \Delta w_{i}(t) = \eta_{w} , s_{\text{scen}} , \Delta d_{i}(t)
 $$
 
-로 변환한 뒤, 흥분/억제 시냅스에 대해 서로 다른 범위로 클리핑하여
+로 변환한 뒤, 시나리오에 따라 정해지는 가중치 범위로 클리핑하여
 
 $$
 w_{i} \leftarrow \operatorname{clip}\bigl(w_{i} + \Delta w_{i}(t), w_{\min}^{(\text{type})}, w_{\max}^{(\text{type})}\bigr)
 $$
 
-를 적용한다(3장, 4장 참조).
+를 적용한다. 여기서 $w_{\min}^{(\text{type})}, w_{\max}^{(\text{type})}$ 의 구체적인 정의는 시나리오별로 다음과 같이 나뉜다.
+
+* **실험 1, 2 (완전 비지도, Diehl–Cook E/I SNN)**  
+  흥분/억제 시냅스 타입에 따라 별도의 범위를 두며,
+  $w_{\min}^{(\text{exc})}, w_{\max}^{(\text{exc})}$ 는 CLI 인수 `--exc-clip-min`, `--exc-clip-max` 로,
+  $w_{\min}^{(\text{inh})}, w_{\max}^{(\text{inh})}` 는 `--inh-clip-min`, `--inh-clip-max` 로 설정한다.
+
+* **실험 3 (준지도)와 실험 4 (완전지도 gradient mimicry)**  
+  흥분/억제 구분 없이 단일 로컬 정책이 모든 학습 시냅스를 제어하므로,
+  모든 학습 시냅스에 대해 공통 전역 범위 $[\texttt{w-clip-min}, \texttt{w-clip-max}]$ 를 사용한다.
+  구현에서는 각 업데이트 후
+  $$
+  w_{i} \leftarrow \operatorname{clip}\bigl(w_{i}, \texttt{w-clip-min}, \texttt{w-clip-max}\bigr)
+  $$
+  를 적용하며, `--w-clip-min`, `--w-clip-max` 는 CLI 하이퍼파라미터로 노출한다.
+
+이 클리핑 규칙은 3–6장에서 시나리오별로 구체화된다.
 
 ### 2.7 가치함수 네트워크 (Critic)
 
@@ -351,69 +385,129 @@ $$
 
 로 수행한다. Actor–Critic 구조 전체는 “MC 리턴 기반 advantage Actor–Critic + PPO 클리핑” 으로 해석할 수 있다.
 
-#### 2.9.3 이미지 단위 미니배치 업데이트
+#### 2.9.3 이미지 단위 미니배치와 per-image 이벤트 서브샘플링
 
-이미지별 전역 보상 $R$ 이 정의되어 있으므로, 실제 업데이트에서는
+이미지별 전역 보상 $R$ 이 정의되어 있으므로, 실제 업데이트에서는 다음과 같은 구조를 사용한다.
 
-* 이미지 1장당 에피소드 버퍼 1개를 만들고
-* 여러 이미지를 모아 에피소드 버퍼들을 이어 붙여
-* **이미지 단위 미니배치**를 구성한 뒤
+1. 이미지 1장당 에피소드 버퍼 1개를 만들고
+2. 여러 이미지를 모아 에피소드 버퍼들을 이어 붙여
+3. **이미지 단위 미니배치**를 구성한 뒤
+4. 이 미니배치에서 얻은 이벤트들 중 일부만 선택해 PPO 업데이트에 사용한다.
 
-이 미니배치 전체에 대해 전체 PPO 손실 $L_{\text{PPO}}(\theta,\phi)$ 를 계산해 `--ppo-epochs` 회만큼 gradient 업데이트를 수행한다.
+여기서 핵심은 **VRAM 사용량과 연산 시간을 제어하기 위해, 이미지마다 고정 개수 $K$ 개의 이벤트만 서브샘플링**한다는 점이다. 이를 위해 CLI 하이퍼파라미터
 
-구현 시 $N$장의 이미지를 묶어 미니배치를 구성하고, 발생한 모든 이벤트를 하나의 배치로 통합(Flatten)하여 업데이트한다.
+* `--events-per-image` $= K$
 
-* 각 이벤트의 Advantage $A_{e}$ 는 배치를 합치기 전, **소속된 이미지(에피소드)의 전역 보상 $R$ 을 기준으로 이미 확정**되어 있다.
-* 따라서 서로 다른 이미지의 이벤트가 배치 내에 섞이더라도 보상의 인과성은 완벽히 보존된다.
-* 오히려 다수 에피소드의 이벤트를 평균 내어 그래디언트를 계산하므로, **분산을 줄이고 학습 안정성을 높이는 정석적인 PPO 배치 학습**이 된다.
+를 두고, 실제 구현은 다음과 같이 동작한다.
 
-이 이미지 단위 미니배치 구조와 이벤트 배치 flatten $\to$ 이벤트 미니배치 분할 방식은 3–6장에서 다루는 모든 시나리오에서 **완전히 동일한 형태로 공유**되며, 각 시나리오 사이에서 달라지는 것은 SNN 구조와 전역 보상 정의뿐이다.
+* 미니배치에 포함된 각 이미지(에피소드) $j$ 에 대해, 에피소드 동안 발생하는 이벤트 스트림 $e = 1,\dots,E_{j}$ 를 시간 순서대로 훑는다.
+* 각 이미지마다 용량이 $K$ 인 **저수지(reservoir) 버퍼** $\mathcal E_{j}$ 를 하나 두고, 고전적인 **저수지 샘플링(reservoir sampling)** 알고리즘으로 이벤트를 선택한다.
+  * $e \le K$ 인 동안에는 들어오는 이벤트를 그대로 $\mathcal E_{j}$ 에 추가한다.
+  * $e > K$ 부터는, 확률 $K/e$ 로 버퍼 내 임의의 인덱스를 골라 현재 이벤트로 교체한다.
+* 에피소드가 끝나면, $\mathcal E_{j}$ 는 해당 이미지에서 발생한 이벤트들 중 **균등확률에 가까운 무작위 표본 $\min(K,E_{j})$ 개**를 담고 있게 된다.
+
+미니배치 전체에 대해, 선택된 이벤트들의 합집합을
+
+$$
+\tilde{\mathcal E} = \bigcup_{j=1}^{N} \mathcal E_{j}
+$$
+
+로 두면, 한 번의 PPO 업데이트에서 실제로 사용하는 이벤트 수는
+
+$$
+|\tilde{\mathcal E}| \le N K
+$$
+
+가 된다. 여기서 $N$ 은 이미지 미니배치 크기(`--batch-size-images`)이다.
+
+이 구조의 장점은 다음과 같다.
+
+* VRAM 사용량과 per-update 연산량이 $N$ 과 $K$ 에 의해 **직접 제어 가능**하다.
+* $K$ 를 줄이면 단일 업데이트는 매우 가벼워지므로, 대신 **훈련집합 단위 epoch 수를 늘리는 방식으로 전체 샘플 수를 보완**할 수 있다.
+* 각 이미지는 항상 최대 $K$ 개의 이벤트를 기여하므로, 이벤트 수가 많은 이미지가 과도하게 큰 비중을 차지하는 것을 방지하고, “이미지 단위 전역 보상”의 해석을 유지한다.
+
+수학적으로 보면, 모든 이벤트 집합 $\mathcal E$ 에 대해 정의된 이상적인 PPO 손실
+
+$$
+\frac{1}{|\mathcal E|} \sum_{e \in \mathcal E} f(e)
+$$
+
+을, 서브샘플링된 이벤트 집합 $\tilde{\mathcal E}$ 에 대한 **Monte Carlo 추정치**
+
+$$
+\frac{1}{|\tilde{\mathcal E}|} \sum_{e \in \tilde{\mathcal E}} f(e)
+$$
+
+로 근사하는 것에 해당한다. 저수지 샘플링은 시간 순서대로 들어오는 스트림에 대해 균등표본을 보장하므로, $K$ 와 epoch 수가 충분히 크면 full-batch PPO 와 동일한 기대값을 갖는 경사 추정치를 제공한다. 대신 per-update 분산이 다소 커지지만, 이는 더 많은 epoch 와 적절한 learning rate 조정으로 상쇄한다.
+
+실제 구현에서는 $\tilde{\mathcal E}$ 를 다시 `--event-batch-size` 크기의 이벤트 미니배치로 나눈 뒤, 각 미니배치에 대해 전체 PPO 손실 $L_{\text{PPO}}(\theta,\phi)$ 를 계산하고 `--ppo-epochs` 회만큼 gradient 업데이트를 수행한다.
+
+이 이미지 단위 미니배치 구조와 per-image 이벤트 서브샘플링, 그리고 이벤트 배치 flatten $\to$ 이벤트 미니배치 분할 방식은 3–6장에서 다루는 **네 가지 모든 시나리오에서 완전히 동일한 형태로 공유**되며, 각 시나리오 간에 달라지는 것은 SNN 구조와 전역 보상 정의뿐이다.
 
 ### 2.9.4 전체 PPO 손실 요약
 
 이 프로젝트에서의 **RL 학습 과정은 PPO 기반 정책 경사법 한 가지로 통일**하며,
-학습 동안 **최적화하는 전체 손실(미니배치 평균)은 다음과 같이 정의**한다.
+학습 동안 **최적화하는 전체 손실(이벤트 미니배치 평균)은 다음과 같이 정의**한다.
 
 $$
-L_{\text{PPO}}(\theta,\phi) = \mathbb{E}*{e}\Bigl[ L*{e}^{\text{CLIP}}(\theta) + c_{v}\bigl(G_{e}-V_{\phi}(s_{e})\bigr)^{2} \Bigr]
+L_{\text{PPO}}(\theta,\phi)
+= \mathbb{E}_{e \in \tilde{\mathcal E}}\Bigl[
+    L_{e}^{\text{CLIP}}(\theta)
+    + c_{v}\bigl(G_{e}-V_{\phi}(s_{e})\bigr)^{2}
+\Bigr].
 $$
 
 여기서
 
-* $e$ 는 에피소드에서 뽑은 이벤트 인덱스 (또는 이미지 단위 미니배치 안의 이벤트 인덱스)이며
-  $\mathbb{E}_{e}[\cdot]$ 는 해당 이벤트들에 대한 평균이다.
-* $L_{e}^{\text{CLIP}}(\theta)$ 는 2.9.1 절에서 정의한 per-event PPO 클리핑 Actor 손실로
-  $\displaystyle L_{e}^{\text{CLIP}}(\theta) = -\min\Bigl(r_{e}(\theta)A_{e}, \ \operatorname{clip}\bigl(r_{e}(\theta),1-\epsilon,1+\epsilon\bigr)A_{e} \Bigr)$ 와 같이 정의된다.
-* $G_{e}$ 는 MC 리턴이며, 이 설계에서는 모든 이벤트에 대해 $G_{e}=R$ 이다.
+* $\tilde{\mathcal E}$ 는 2.9.3절에서 정의한 **per-image 저수지 샘플링으로 선택된 이벤트 집합**이다.
+* $e$ 는 이 집합에서 뽑은 이벤트 인덱스이며, $\mathbb{E}_{e \in \tilde{\mathcal E}}[\cdot]$ 는 그 평균을 뜻한다.
+* $L_{e}^{\text{CLIP}}(\theta)$ 는 2.9.1절에서 정의한 per-event PPO 클리핑 Actor 손실로,
+  $\displaystyle L_{e}^{\text{CLIP}}(\theta) = -\min\Bigl(r_{e}(\theta) A_{e},\ \text{clip}\bigl(r_{e}(\theta),1-\epsilon,1+\epsilon\bigr)A_{e} \Bigr)$ 와 같이 정의된다.
+* $G_{e}$ 는 MC 리턴이며, 본 설계에서는 모든 이벤트에 대해 **전역 보상** $R$ 을 그대로 사용해 $G_{e}=R$ 으로 둔다.
 * $V_{\phi}(s_{e})$ 는 상태 $s_{e}$ 에 대한 Critic 출력이다.
 * $c_{v}>0$ 는 value 손실(제곱 오차)의 비중을 조절하는 하이퍼파라미터다.
 
 따라서 **Actor와 Critic을 동시에 학습할 때 사용하는 RL 학습 손실은 위의 $L_{\text{PPO}}$ 하나뿐**이며,
 모든 파라미터 업데이트는 이 손실의 그래디언트 $\nabla_{\theta,\phi} L_{\text{PPO}}(\theta,\phi)$ 를 기준으로 수행된다.
-
 엔트로피 정규화 항은 기본 설계에서는 사용하지 않고,
-정책 표준편차 $\sigma_{\text{policy}}$, PPO 클리핑 범위 $\epsilon$, 미니배치 크기 및 epoch 수를 직접 하이퍼파라미터로 조절한다.
+정책 표준편차 $\sigma_{\text{policy}}$, PPO 클리핑 범위 $\epsilon$, 이미지 미니배치 크기(`--batch-size-images`),
+per-image 이벤트 수(`--events-per-image`), 이벤트 미니배치 크기(`--event-batch-size`), epoch 수(`--ppo-epochs`)를 직접 하이퍼파라미터로 조절한다.
 
-구현에서는 위 $L_{\text{PPO}}(\theta,\phi)$ 를 하나의 스칼라 손실로 계산하더라도, Actor와 Critic은 서로 다른 파라미터 집합과 서로 다른 optimizer로 업데이트한다. 즉 $L_{e}^{\text{CLIP}}(\theta)$ 항의 gradient는 Actor 파라미터 $\theta$에만, $(G_{e} - V_{\phi}(s_{e}))^{2}$ 항의 gradient는 Critic 파라미터 $\phi$에만 전파되며, 두 optimizer는 서로 다른 학습률을 사용할 수 있다. $L_{\text{PPO}}$를 하나의 손실로 쓰는 것은 표기상의 편의를 위한 것일 뿐, Actor와 Critic을 하나의 네트워크나 하나의 optimizer로 합친다는 의미는 아니다.
-
-구현에서는 위 기대값 $\mathbb{E}_{e}[\cdot]$ 를 모든 이벤트에 대한 full-batch 평균으로 한 번에 계산하지 않고, 에피소드 버퍼에 쌓인 이벤트 인덱스들을 섞은 뒤 **이벤트 미니배치(event minibatch)** 로 나누어 순회한다. 각 PPO epoch마다 크기가 `--ppo-batch-size` 인 여러 미니배치 $\mathcal{B}_{k}$ 에 대해
-
-$$
-L_{\text{PPO}}^{(k)}(\theta,\phi) = 
-\frac{1}{|\mathcal{B}_{k}|} \sum_{e \in \mathcal{B}_{k}} \Bigl[ L_{e}^{\text{CLIP}}(\theta) + c_{v} \bigl(G_{e} - V_{\phi}(s_{e})\bigr)^{2} \Bigr]
-$$
-
-를 계산하고, 이 미니배치 손실에 대한 그래디언트를 누적·적용하는 방식으로 최적화를 수행한다. 이는 full-batch 경사
+구현에서는 $\tilde{\mathcal E}$ 를 다시 여러 개의 이벤트 미니배치 $\mathcal B_{k}$ 로 나눈 뒤
 
 $$
-\nabla_{\theta,\phi} L_{\text{PPO}}(\theta,\phi) =
-\frac{1}{E} \sum_{e=1}^{E} \nabla_{\theta,\phi} \Bigl[ L_{e}^{\text{CLIP}}(\theta) + c_{v} \bigl(G_{e} - V_{\phi}(s_{e})\bigr)^{2} \Bigr]
+L_{\text{PPO}}^{(k)}(\theta,\phi)
+= \frac{1}{|\mathcal{B}_{k}|}
+  \sum_{e \in \mathcal{B}_{k}}
+  \Bigl[
+    L_{e}^{\text{CLIP}}(\theta)
+    + c_{v}\bigl(G_{e}-V_{\phi}(s_{e})\bigr)^{2}
+  \Bigr]
 $$
 
-를 **확률적 경사하강법(stochastic gradient descent)** 형태로 근사한 것으로, on-policy Monte Carlo 정책 경사에서 널리 사용하는 표준적인 구현이다. 보상 $r_{e}$, return $G_{e}$, advantage $A_{e}$ 계산 역시 이벤트 텐서 위에서 GPU 벡터화 연산으로 한 번에 수행되며, 이는 위 수식에서 정의한 per-event 값들을 일괄 계산한 것과 수학적으로 동일하다.
+를 계산하고, 이 미니배치 손실에 대한 그래디언트를 누적·적용하는 방식으로 최적화를 수행한다. 이는 이상적인 full-batch 경사
 
-요약하면, 이 프로젝트의 RL 업데이트는 항상 **이미지 단위 on-policy MC PPO + 이벤트 미니배치 SGD** 구조를 따르며, 나머지 장(3–6장)에 나오는 알고리즘 설명은 모두 이 공통 틀 위에 얹힌 **시나리오별 특수화** 로 이해하면 된다.
+$$
+\nabla_{\theta,\phi} L_{\text{PPO}}(\theta,\phi)
+= \frac{1}{|\tilde{\mathcal E}|}
+  \sum_{e \in \tilde{\mathcal E}}
+  \nabla_{\theta,\phi}
+  \Bigl[
+    L_{e}^{\text{CLIP}}(\theta)
+    + c_{v}\bigl(G_{e}-V_{\phi}(s_{e})\bigr)^{2}
+  \Bigr]
+$$
 
+를 **확률적 경사하강법(stochastic gradient descent)** 형태로 근사한 것으로, on-policy MC PPO 의 표준 구현과 동일한 구조를 갖는다.
+
+요약하면, 이 프로젝트의 RL 업데이트는 항상
+
+* **이미지 단위 on-policy MC PPO**
+* **per-image 저수지 샘플링 기반 이벤트 서브샘플링**
+* **이벤트 미니배치 SGD**
+
+의 세 요소를 결합한 형태이며,
+이 공통 틀 위에 3–6장에서 각 시나리오별 SNN 구조와 전역 보상 정의만 달리 얹는 구조로 전체 실험을 설계한다.
 ## 3. 실험 1 (시나리오 1.1): 완전 비지도 단일 가중치 정책
 
 ### 3.1 목표
@@ -552,8 +646,8 @@ $$
 $$
 R_{\text{stab}}(x_{n}) =
 \begin{cases}
-0 & \text{if } j_{\text{prev}}(x_{n}) \text{ 가 정의되어 있지 않은 첫 방문} \
-+1 & \text{if } j_{\text{curr}}(x_{n}) = j_{\text{prev}}(x_{n}) \
+0 & \text{if } j_{\text{prev}}(x_{n}) \text{ 가 정의되어 있지 않은 첫 방문} \\\\
++1 & \text{if } j_{\text{curr}}(x_{n}) = j_{\text{prev}}(x_{n}) \\\\
 -1 & \text{if } j_{\text{curr}}(x_{n}) \neq j_{\text{prev}}(x_{n})
 \end{cases}
 $$
@@ -719,6 +813,11 @@ SNN 구조는 3장의 Diehl–Cook 아키텍처와 동일하다.
 * 출력층: 10 LIF 뉴런
 
 학습 대상 가중치는 Input→Hidden, Hidden→Output 전체이다. 모든 학습 시냅스는 단일 정책 $\pi_{\text{semi}}$ 를 공유한다.
+이 시나리오에서는 흥분/억제 타입을 명시적으로 구분하지 않으므로,
+모든 학습 시냅스에 대해 전역 가중치 클리핑 범위 $[\texttt{w-clip-min}, \texttt{w-clip-max}]$ 를 적용한다.
+구현에서는 각 업데이트 후
+$w_{i} \leftarrow \operatorname{clip}\bigl(w_{i}, \texttt{w-clip-min}, \texttt{w-clip-max}\bigr)$
+를 수행하여, 준지도 실험에서 로컬 정책이 비정상적으로 큰 가중치를 만들지 못하도록 안정성을 보장한다.
 
 출력층 뉴런 인덱스와 라벨은 1:1로 대응된다. 예를 들어 출력층 뉴런 $k$ 는 숫자 $k$ 를 의미한다.
 
@@ -841,7 +940,12 @@ $$
 * 은닉층: 32
 * 출력층: 10 LIF 뉴런
 
-입력을 제외한 모든 층 사이의 시냅스가 학습 대상이다. 각 시냅스에는 정규화된 레이어 인덱스 $l_{\text{norm},i} = i / \text{은닉층 개수 +1}$ 를 부여한다(예: 입력 직후 히든층 0.2, 그 다음 0.4, 마지막 히든층 0.8, 출력층 1.0 등).
+입력을 제외한 모든 층 사이의 시냅스가 학습 대상이다. 모든 학습 시냅스는 단일 정책 $\pi_{\text{grad}}$ 의 제어를 받으며,
+가중치 값은 전역 클리핑 범위 $[\texttt{w-clip-min}, \texttt{w-clip-max}]$ 안에 유지한다.
+구현에서는 각 업데이트 후
+$w_{i} \leftarrow \operatorname{clip}\bigl(w_{i}, \texttt{w-clip-min}, \texttt{w-clip-max}\bigr)$
+를 적용하여, Teacher gradient 기반 보상이 과도하게 큰 업데이트를 유도하더라도 실제 시냅스 가중치는 안전한 범위 내에 머무르도록 한다.
+각 시냅스에는 정규화된 레이어 인덱스 $l_{\text{norm},i} = \frac{i}{L+1}$ 를 부여한다(예: 입력 직후 히든층 0.2, 그 다음 0.4, 마지막 히든층 0.8, 출력층 1.0 등).
 
 ### 6.3 로컬 상태와 가중치 정책
 
@@ -948,11 +1052,12 @@ $$
 
 ### 8.2 SNN 구조 관련
 
-* `--spike-array-len`: 로컬 스파이크 히스토리 길이 $L$ (2.3절의 $X_{i}(t) \in {0,1}^{2 \times L}$ 에서 시간축 길이)
+* `--spike-array-len`: 로컬 스파이크 히스토리 길이 $L$ (2.3절의 $X_{i}(t) \in \{0,1\}^{2 \times L}$ 에서 시간축 길이)
 * `--N-E`: Diehl–Cook 흥분 뉴런 수(시나리오 1.1, 1.2)
 * `--N-hidden`: 준지도 실험(시나리오 2)의 히든 뉴런 수
 * `--lif-tau-m` 등: LIF 파라미터들
 * `--layer-index-scale`: $l_{\text{norm}}$ 스케일 조절 계수
+* `--sup-input-encoding`: 완전지도 gradient mimic 시나리오(시나리오 3)의 입력 인코딩 방식 선택값 $\in \{\texttt{poisson}, \texttt{direct}\}$ (2.1.2절 참조)
 
 ### 8.3 정책·Critic 관련
 
@@ -963,19 +1068,22 @@ $$
 * `--lr-actor`: Actor 학습률(필요 시 시나리오별 세분화 가능)
 * `--lr-critic`: Critic 학습률
 * `--ppo-eps`: PPO 클리핑 범위 $\epsilon$
-* `--ppo-epochs`: 한 이미지 배치에 대해 PPO 업데이트를 반복하는 epoch 수
-* `--batch-size-images`: 이미지 단위 미니배치 크기(에피소드 수)
-* `--event-batch-size`: 에피소드 내 이벤트를 Actor·Critic에 넣을 때 사용할 **이벤트 미니배치 크기**. 너무 크게 잡으면 GPU 메모리 사용량이 증가하고, 너무 작게 잡으면 커널 런칭 오버헤드가 커질 수 있다. on-policy 특성은 유지되며, 2.9.4절의 미니배치 PPO 근사와 동일한 맥락이다.
+* `--ppo-epochs`: 한 이미지 미니배치(여러 에피소드)에서 수집된 이벤트들에 대해 PPO 업데이트를 반복하는 epoch 수
+* `--batch-size-images`: 이미지 단위 미니배치 크기(에피소드 수, 2.1절 및 2.9.3절 참조)
+* `--events-per-image`: 각 이미지(에피소드)에서 저수지 샘플링으로 선택할 이벤트 수 상한 $K$ (2.9.3절의 per-image 이벤트 서브샘플링에서 사용)
+* `--event-batch-size`: 서브샘플링으로 얻은 이벤트 집합 $\tilde{\mathcal E}$ 를 Actor·Critic에 넣을 때 사용할 **이벤트 미니배치 크기**. 너무 크게 잡으면 GPU 메모리 사용량이 증가하고, 너무 작게 잡으면 커널 런칭 오버헤드가 커질 수 있다. on-policy 특성은 유지되며, 2.9.4절의 미니배치 PPO 근사와 동일한 맥락이다.
 
 ### 8.4 비지도·준지도 보상 관련
+
 
 * `--rho-target`: 비지도 희소성 목표 발화율 $\rho_{\text{target}}$
 * `--alpha-sparse`: $R_{\text{sparse}}$ 가중치
 * `--alpha-div`: $R_{\text{div}}$ 가중치
 * `--alpha-stab`: $R_{\text{stab}}$ 가중치
 * `--beta-margin`: 준지도 마진 보상 스케일 $\beta$
-* `--exc-clip-min/max`: 흥분 자리 가중치 클리핑 범위
-* `--inh-clip-min/max`: 억제 자리 가중치 클리핑 범위
+* `--exc-clip-min/max`: 완전 비지도 실험(실험 1, 2)에서 사용하는 흥분 자리 가중치 클리핑 범위
+* `--inh-clip-min/max`: 완전 비지도 실험(실험 1, 2)에서 사용하는 억제 자리 가중치 클리핑 범위
+* `--w-clip-min/max`: 준지도(실험 3) 및 완전지도 gradient mimicry(실험 4)에서 사용하는 전역 가중치 클리핑 범위. 모든 학습 시냅스에 대해 각 업데이트 후 $w_{i} \leftarrow \operatorname{clip}\bigl(w_{i}, \texttt{w-clip-min}, \texttt{w-clip-max}\bigr)$ 를 적용하여, 시냅스 가중치가 $[\texttt{w-clip-min}, \texttt{w-clip-max}]$ 구간을 벗어나지 않도록 강제한다.
 
 ### 8.5 gradient mimicry 관련
 

@@ -79,13 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--grad-clip-min",
         type=float,
         default=0.0,
-        help="Lower bound for supervised/semi-supervised weight updates",
+        help="Lower bound for supervised/semi-supervised weights (values)",
     )
     parser.add_argument(
         "--grad-clip-max",
         type=float,
         default=1.0,
-        help="Upper bound for supervised/semi-supervised weight updates",
+        help="Upper bound for supervised/semi-supervised weights (values)",
     )
     parser.add_argument(
         "--inh-clip-min",
