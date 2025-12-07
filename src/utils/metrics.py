@@ -66,7 +66,7 @@ def plot_weight_histograms(
     plt.savefig(out_path)
     plt.close()
 
-    np.savez(base.with_suffix(".npz"), weights_before=w_before, weights_after=w_after)
+    #np.savez(base.with_suffix(".npz"), weights_before=w_before, weights_after=w_after)
     with (base.with_name(base.name + "_stats.txt")).open("w") as f:
         f.write(
             "before_mean\t{:.6f}\nbefore_std\t{:.6f}\nafter_mean\t{:.6f}\nafter_std\t{:.6f}\n".format(
@@ -118,7 +118,7 @@ def evaluate_labeling(
     for t, p in zip(labels_np, preds_np):
         conf[t, p] += 1
 
-    np.savez(out_prefix.with_suffix(".npz"), confusion=conf, preds=preds_np, labels=labels_np)
+    #np.savez(out_prefix.with_suffix(".npz"), confusion=conf, preds=preds_np, labels=labels_np)
     with (out_prefix.with_name(out_prefix.name + "_metrics.txt")).open("w") as f:
         f.write(f"accuracy\t{accuracy:.6f}\n")
 
@@ -153,7 +153,7 @@ def plot_grad_alignment(
     plt.savefig(out_path)
     plt.close()
 
-    np.savez(base.with_suffix(".npz"), delta_agent=d_agent, delta_teacher=d_teacher)
+    #np.savez(base.with_suffix(".npz"), delta_agent=d_agent, delta_teacher=d_teacher)
 
     mse = np.mean((d_agent - d_teacher) ** 2)
     with (base.with_name(base.name + "_metrics.txt")).open("w") as f:
