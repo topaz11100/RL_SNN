@@ -291,6 +291,8 @@ def run_unsup1(args, logger):
                 padded_post=_get_padded(exc_spikes),
             )
 
+            event_buffer.subsample_per_image(args.events_per_image)
+
             batch_size = winners.numel()
             sample_increment = winners.new_full((), batch_size, dtype=torch.float32)
             total_samples = total_samples + sample_increment
