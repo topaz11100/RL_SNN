@@ -5,7 +5,7 @@ from scenarios.semi_supervised import run_semi
 from scenarios.unsup_dual import run_unsup2
 from scenarios.unsup_single import run_unsup1
 from utils.cli import parse_args
-from utils.logging import create_result_dir, get_logger
+from utils.logging import create_log_dir, create_result_dir, get_logger
 from utils.seeds import set_global_seed
 
 
@@ -14,8 +14,10 @@ def main():
     set_global_seed(args.seed)
 
     result_dir = create_result_dir(args.scenario, args.run_name)
+    log_dir = create_log_dir(args.scenario, args.run_name)
     args.result_dir = result_dir
-    logger = get_logger(result_dir)
+    args.log_dir = log_dir
+    logger = get_logger(log_dir)
     logger.info("Args: %s", vars(args))
 
     scenario_runners: Dict[str, Callable] = {
@@ -27,6 +29,7 @@ def main():
 
     logger.info("Starting scenario: %s", args.scenario)
     logger.info("Results will be saved to: %s", result_dir)
+    logger.info("Logs will be saved to: %s", log_dir)
 
     runner = scenario_runners.get(args.scenario)
     if runner is None:

@@ -1,22 +1,36 @@
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RESULTS_ROOT = PROJECT_ROOT / "results"
+LOGS_ROOT = PROJECT_ROOT / "logs"
 
 
 def create_result_dir(scenario: str, run_name: Optional[str] = None) -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run = run_name or timestamp
-    result_dir = os.path.join("results", scenario, run)
-    os.makedirs(result_dir, exist_ok=True)
-    return result_dir
+    result_dir = RESULTS_ROOT / scenario / run
+    result_dir.mkdir(parents=True, exist_ok=True)
+    return str(result_dir)
+
+
+def create_log_dir(scenario: str, run_name: Optional[str] = None) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run = run_name or timestamp
+    log_dir = LOGS_ROOT / scenario / run
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir)
 
 
 def get_logger(log_dir: str) -> logging.Logger:
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "log.txt")
+    log_dir_path = Path(log_dir)
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir_path / "log.txt"
 
-    logger = logging.getLogger(f"snn_rl_{os.path.abspath(log_dir)}")
+    logger = logging.getLogger(f"snn_rl_{log_dir_path.resolve()}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
