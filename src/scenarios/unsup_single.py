@@ -1,11 +1,5 @@
-import os
+from pathlib import Path
 from typing import Optional, Tuple
-
-import os
-from typing import Tuple
-
-import os
-from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -27,17 +21,22 @@ from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_diehl_cook import DiehlCookNetwork
 from utils.event_utils import gather_events
+from utils.logging import resolve_path
 
 
-def _ensure_metrics_file(path: str) -> None:
-    if not os.path.exists(path):
-        with open(path, "w") as f:
+def _ensure_metrics_file(path: str | Path) -> None:
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w") as f:
             f.write("epoch\tR_sparse\tR_div\tR_stab\tR_total\n")
 
 
-def _ensure_eval_file(path: str) -> None:
-    if not os.path.exists(path):
-        with open(path, "w") as f:
+def _ensure_eval_file(path: str | Path) -> None:
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w") as f:
             f.write("epoch\taccuracy\n")
 
 
@@ -180,7 +179,7 @@ def analyze_stdp_profile(
             delta_t = _extract_delta_t(states).cpu()
             delta_d = actions.detach().cpu()
             if delta_t.numel() > 0 and delta_d.numel() > 0:
-                plot_delta_t_delta_d(delta_t, delta_d, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+                plot_delta_t_delta_d(delta_t, delta_d, result_dir / "delta_t_delta_d.png")
 
     if network_was_training:
         network.train()
@@ -193,6 +192,9 @@ def analyze_stdp_profile(
 def run_unsup1(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
+
+    result_dir = resolve_path(args.result_dir)
+    args.result_dir = str(result_dir)
 
     prev_winners = torch.full((60000,), -1, device=device, dtype=torch.long)
     winner_counts = torch.zeros(args.N_E, device=device)
@@ -208,9 +210,9 @@ def run_unsup1(args, logger):
     w_input_exc_before = network.w_input_exc.detach().cpu().clone()
     w_inh_exc_before = network.w_inh_exc.detach().cpu().clone()
 
-    metrics_path = os.path.join(args.result_dir, "metrics_train.txt")
-    metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
-    metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
+    metrics_path = result_dir / "metrics_train.txt"
+    metrics_val = result_dir / "metrics_val.txt"
+    metrics_test = result_dir / "metrics_test.txt"
     _ensure_metrics_file(metrics_path)
     _ensure_eval_file(metrics_val)
     _ensure_eval_file(metrics_test)
@@ -351,10 +353,12 @@ def run_unsup1(args, logger):
         neuron_labels = compute_neuron_labels(train_rates, train_labels, num_classes=10)
 
         val_rates, val_labels = _collect_firing_rates(network, val_loader, device, args)
-        val_acc, _ = evaluate_labeling(val_rates, val_labels, neuron_labels, 10, os.path.join(args.result_dir, f"val_confusion_epoch{epoch}"))
+        val_acc, _ = evaluate_labeling(
+            val_rates, val_labels, neuron_labels, 10, result_dir / f"val_confusion_epoch{epoch}"
+        )
         test_rates, test_labels = _collect_firing_rates(network, test_loader, device, args)
         test_acc, _ = evaluate_labeling(
-            test_rates, test_labels, neuron_labels, 10, os.path.join(args.result_dir, f"test_confusion_epoch{epoch}")
+            test_rates, test_labels, neuron_labels, 10, result_dir / f"test_confusion_epoch{epoch}"
         )
 
         with open(metrics_val, "a") as f:
@@ -374,15 +378,9 @@ def run_unsup1(args, logger):
                 test_acc,
             )
 
-    plot_weight_histograms(
-        w_input_exc_before, network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "hist_input_exc.png")
-    )
-    plot_weight_histograms(
-        w_inh_exc_before, network.w_inh_exc.detach().cpu(), os.path.join(args.result_dir, "hist_inh_exc.png")
-    )
+    plot_weight_histograms(w_input_exc_before, network.w_input_exc.detach().cpu(), result_dir / "hist_input_exc.png")
+    plot_weight_histograms(w_inh_exc_before, network.w_inh_exc.detach().cpu(), result_dir / "hist_inh_exc.png")
 
     analyze_stdp_profile(network, actor, critic, train_loader, args, device)
 
-    plot_receptive_fields(
-        network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "receptive_fields.png")
-    )
+    plot_receptive_fields(network.w_input_exc.detach().cpu(), result_dir / "receptive_fields.png")

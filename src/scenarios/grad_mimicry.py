@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -15,11 +15,14 @@ from snn.lif import LIFParams
 from snn.network_grad_mimicry import GradMimicryNetwork
 from utils.event_utils import gather_events
 from utils.metrics import plot_delta_t_delta_d, plot_grad_alignment, plot_weight_histograms
+from utils.logging import resolve_path
 
 
-def _ensure_metrics_file(path: str, header: str) -> None:
-    if not os.path.exists(path):
-        with open(path, "w") as f:
+def _ensure_metrics_file(path: str | Path, header: str) -> None:
+    resolved = resolve_path(path)
+    if not resolved.exists():
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w") as f:
             f.write(header + "\n")
 
 
@@ -101,6 +104,7 @@ def analyze_stdp_profile(
     args,
     device: torch.device,
 ) -> None:
+    result_dir = resolve_path(args.result_dir)
     network_state = network.training
     actor_state = actor.training
     critic_state = critic.training
@@ -166,7 +170,7 @@ def analyze_stdp_profile(
             delta_t = _extract_delta_t(states).cpu()
             delta_d = actions.detach().cpu()
             if delta_t.numel() > 0 and delta_d.numel() > 0:
-                plot_delta_t_delta_d(delta_t, delta_d, os.path.join(args.result_dir, "delta_t_delta_d.png"))
+                plot_delta_t_delta_d(delta_t, delta_d, result_dir / "delta_t_delta_d.png")
 
     if network_state:
         network.train()
@@ -201,6 +205,9 @@ def run_grad(args, logger):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader, test_loader = get_mnist_dataloaders(args.batch_size_images, args.seed)
 
+    result_dir = resolve_path(args.result_dir)
+    args.result_dir = str(result_dir)
+
     lif_params = LIFParams(dt=args.dt)
     network = GradMimicryNetwork(hidden_params=lif_params, output_params=lif_params).to(device)
     actor = GaussianPolicy(sigma=getattr(args, "sigma_sup", args.sigma_unsup1), extra_feature_dim=4).to(device)
@@ -218,9 +225,9 @@ def run_grad(args, logger):
         torch.zeros((max_batch_size, *w.shape), device=device, dtype=w.dtype) for w in network.w_layers
     ]
 
-    metrics_train = os.path.join(args.result_dir, "metrics_train.txt")
-    metrics_val = os.path.join(args.result_dir, "metrics_val.txt")
-    metrics_test = os.path.join(args.result_dir, "metrics_test.txt")
+    metrics_train = result_dir / "metrics_train.txt"
+    metrics_val = result_dir / "metrics_val.txt"
+    metrics_test = result_dir / "metrics_test.txt"
     _ensure_metrics_file(metrics_train, "epoch\tacc\treward\talign\tactive_ratio")
     _ensure_metrics_file(metrics_val, "epoch\tacc\treward\talign")
     _ensure_metrics_file(metrics_test, "epoch\tacc\treward\talign")
@@ -433,9 +440,7 @@ def run_grad(args, logger):
 
     weights_after = [w.detach().cpu().clone() for w in network.w_layers]
     for i, (w_before, w_after) in enumerate(zip(weights_before, weights_after)):
-        plot_weight_histograms(
-            w_before, w_after, os.path.join(args.result_dir, f"hist_layer{i}.png")
-        )
+        plot_weight_histograms(w_before, w_after, result_dir / f"hist_layer{i}.png")
 
     if agent_deltas_log and teacher_deltas_log:
         agent_tensors = [torch.stack(log) for log in agent_deltas_log if log]
@@ -443,6 +448,6 @@ def run_grad(args, logger):
         if agent_tensors and teacher_tensors:
             agent_cat = torch.cat(agent_tensors)
             teacher_cat = torch.cat(teacher_tensors)
-            plot_grad_alignment(agent_cat, teacher_cat, os.path.join(args.result_dir, "grad_alignment.png"))
+            plot_grad_alignment(agent_cat, teacher_cat, result_dir / "grad_alignment.png")
 
     analyze_stdp_profile(network, actor, critic, train_loader, args, device)
