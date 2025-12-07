@@ -69,9 +69,10 @@ run_one() {
 # [시나리오별 테스트 실행]
 # -----------------------------------------------------------------------------
 
-run_one "grad" "--direct-input --log-gradient-stats"
 # 4. Unsupervised Dual Policy
 run_one "unsup2" ""
+run_one "grad" "--direct-input --log-gradient-stats"
+
 
 
 # 1. Gradient Mimicry (Poisson)

@@ -23,15 +23,6 @@ def create_result_dir(scenario: str, run_name: Optional[str] = None) -> str:
     result_dir.mkdir(parents=True, exist_ok=True)
     return str(result_dir)
 
-
-def create_log_dir(scenario: str, run_name: Optional[str] = None) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run = run_name or timestamp
-    log_dir = LOGS_ROOT / scenario / run
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return str(log_dir)
-
-
 def get_logger(log_dir: str) -> logging.Logger:
     log_dir_path = Path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
