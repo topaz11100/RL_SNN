@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Iterable, Tuple
 
@@ -7,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 
 
 def _to_numpy(array: torch.Tensor | np.ndarray | Iterable) -> np.ndarray:
@@ -65,6 +67,22 @@ def plot_weight_histograms(
                 float(np.mean(w_before)), float(np.std(w_before)), float(np.mean(w_after)), float(np.std(w_after))
             )
         )
+
+
+def plot_receptive_fields(weights: torch.Tensor, out_path: str) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    n_neurons = weights.shape[1]
+    nrow = max(1, math.isqrt(n_neurons))
+
+    weight_imgs = weights.t().reshape(n_neurons, 1, 28, 28)
+    grid = torchvision.utils.make_grid(weight_imgs, nrow=nrow, normalize=True)
+
+    plt.figure(figsize=(8, 8))
+    plt.imshow(grid.permute(1, 2, 0).squeeze(), cmap="hot")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 
 
 def compute_neuron_labels(firing_rates: torch.Tensor, labels: torch.Tensor, num_classes: int) -> torch.Tensor:

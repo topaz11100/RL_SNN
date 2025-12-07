@@ -14,7 +14,13 @@ from snn.encoding import poisson_encode
 from snn.lif import LIFParams
 from snn.network_diehl_cook import DiehlCookNetwork
 from utils.event_utils import gather_events
-from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
+from utils.metrics import (
+    compute_neuron_labels,
+    evaluate_labeling,
+    plot_delta_t_delta_d,
+    plot_receptive_fields,
+    plot_weight_histograms,
+)
 
 
 def _ensure_metrics_file(path: str) -> None:
@@ -463,4 +469,8 @@ def run_unsup2(args, logger):
 
     analyze_stdp_profile(
         network, actor_exc, actor_inh, critic_exc, critic_inh, train_loader, args, device
+    )
+
+    plot_receptive_fields(
+        network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "receptive_fields_exc.png")
     )
