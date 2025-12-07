@@ -25,6 +25,10 @@ class GaussianPolicy(nn.Module):
     def __init__(self, sigma: float, extra_feature_dim: int = 0):
         super().__init__()
         self.encoder = _CNNFront()
+        
+        # [수정] 아래 줄을 추가하여 속성을 저장해야 합니다.
+        self.extra_feature_dim = extra_feature_dim
+
         input_dim = 16 + extra_feature_dim
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, 32),

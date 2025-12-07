@@ -12,10 +12,10 @@ T_SHORT=5        # 매우 짧은 시뮬레이션 시간
 echo "Starting Error Check (Dry Run)..."
 
 # 1. Unsup1
-#echo "[Checking Unsup1]"
-#python src/main.py --scenario unsup1 --run-name "debug_unsup1_${TIMESTAMP}" \
-#    --num-epochs ${EPOCHS} --batch-size-images ${BATCH} --events-per-image ${K} \
-#    --T-unsup1 ${T_SHORT} --exc-clip-max 1.0 --inh-clip-min -1.0 --log-interval 100
+echo "[Checking Unsup1]"
+python src/main.py --scenario unsup1 --run-name "debug_unsup1_${TIMESTAMP}" \
+    --num-epochs ${EPOCHS} --batch-size-images ${BATCH} --events-per-image ${K} \
+    --T-unsup1 ${T_SHORT} --exc-clip-max 1.0 --inh-clip-min -1.0 --log-interval 100
 
 # 2. Unsup2
 echo "[Checking Unsup2]"
