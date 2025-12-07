@@ -66,7 +66,7 @@ def _evaluate(network: GradMimicryNetwork, loader, device, args) -> Tuple[float,
             masked_rates = firing_rates.clone()
             masked_rates.scatter_(1, labels.view(-1, 1), -1e9)
             max_other, _ = masked_rates.max(dim=1)
-            margin = true_rates - max_other
+            margin = true_rates - max_other  # Validation reward uses positive classification margin
             reward_sum = reward_sum + margin.sum()
             total = total + labels.numel()
     network.train()
@@ -241,11 +241,14 @@ def run_grad(args, logger):
     total_synapses = sum(w.numel() for w in network.w_layers)
 
     def compute_loss_stateless(params, buffers, x, y):
-        _, _, firing_rates = functional_call(network, (params, buffers), (x.unsqueeze(0),))
+        hidden_spikes_list, output_spikes, firing_rates = functional_call(
+            network, (params, buffers), (x.unsqueeze(0),)
+        )
         logits = firing_rates * 5.0
-        return F.cross_entropy(logits, y.unsqueeze(0))
+        loss = F.cross_entropy(logits, y.unsqueeze(0))
+        return loss, (hidden_spikes_list, output_spikes, firing_rates)
 
-    per_sample_grads_fn = vmap(grad(compute_loss_stateless), in_dims=(None, None, 0, 0))
+    per_sample_grads_fn = vmap(grad(compute_loss_stateless, has_aux=True), in_dims=(None, None, 0, 0))
 
     s_scen = 1.0
     ones_scalar = torch.tensor(1.0, device=device)
@@ -265,7 +268,14 @@ def run_grad(args, logger):
             else:
                 input_spikes = poisson_encode(images, args.T_sup, max_rate=args.max_rate)
 
-            hidden_spikes_list, output_spikes, firing_rates = network(input_spikes)
+            params = dict(network.named_parameters())
+            buffers = dict(network.named_buffers())
+            grad_dict, auxiliaries = per_sample_grads_fn(params, buffers, input_spikes, labels)
+            hidden_spikes_list_batched, output_spikes_batched, firing_rates_batched = auxiliaries
+
+            hidden_spikes_list = [spikes.squeeze(1) for spikes in hidden_spikes_list_batched]
+            output_spikes = output_spikes_batched.squeeze(1)
+            firing_rates = firing_rates_batched.squeeze(1)
 
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
@@ -341,10 +351,6 @@ def run_grad(args, logger):
 
                 teacher_deltas: list[torch.Tensor] = [torch.zeros_like(agent_deltas[li]) for li in range(num_layers)]
 
-                params = dict(network.named_parameters())
-                buffers = dict(network.named_buffers())
-                grad_dict = per_sample_grads_fn(params, buffers, input_spikes, labels)
-
                 for li in range(num_layers):
                     grad_batch = grad_dict.get(f"w_layers.{li}")
                     if grad_batch is None:
@@ -370,7 +376,7 @@ def run_grad(args, logger):
                     squared_error_sum / active_count.clamp_min(1).float(),
                     torch.zeros_like(squared_error_sum),
                 )
-                rewards = -align_loss
+                rewards = -align_loss  # Train reward is negative L2 gradient alignment
 
                 returns = rewards.detach()[batch_idx_events]
                 advantages = returns - values_old.detach()
@@ -401,8 +407,8 @@ def run_grad(args, logger):
                         network.w_layers[li].clamp_(w_clip_min, w_clip_max)
 
                 for li in range(num_layers):
-                    agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
-                    teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach().cpu())
+                    agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach())
+                    teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach())
 
                 total_reward = total_reward + rewards.sum()
                 total_align = total_align + rewards.sum()
@@ -431,6 +437,7 @@ def run_grad(args, logger):
             f.write(f"{epoch}\t{test_acc:.6f}\t{test_reward:.6f}\t0.000000\n")
 
         if epoch % args.log_interval == 0:
+            # Train reward = gradient alignment (negative L2), Validation reward = classification margin (positive)
             logger.info(
                 "Epoch %d | Train acc %.4f reward %.4f align %.4f | Val acc %.4f | Test acc %.4f",
                 epoch,
@@ -448,6 +455,8 @@ def run_grad(args, logger):
         plot_weight_histograms(w_before, w_after, result_dir / f"hist_layer{i}.png")
 
     if agent_deltas_log and teacher_deltas_log:
+        agent_deltas_log = [[t.cpu() for t in log] for log in agent_deltas_log]
+        teacher_deltas_log = [[t.cpu() for t in log] for log in teacher_deltas_log]
         agent_tensors = [torch.stack(log) for log in agent_deltas_log if log]
         teacher_tensors = [torch.stack(log) for log in teacher_deltas_log if log]
         if agent_tensors and teacher_tensors:
