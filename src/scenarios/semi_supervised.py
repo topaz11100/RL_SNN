@@ -217,6 +217,8 @@ def run_semi(args, logger):
     event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
 
     s_scen = 1.0
+    grad_clip_min = args.grad_clip_min
+    grad_clip_max = args.grad_clip_max
     for epoch in range(1, args.num_epochs + 1):
         total_correct = torch.zeros((), device=device)
         total_margin = torch.zeros((), device=device)
@@ -300,11 +302,11 @@ def run_semi(args, logger):
                     in_mask = connection_ids == 0
                     if in_mask.any():
                         _scatter_updates(delta[in_mask], pre_idx[in_mask], post_idx[in_mask], network.w_input_hidden)
-                        network.w_input_hidden.clamp_(args.grad_clip_min, args.grad_clip_max)
+                        network.w_input_hidden.clamp_(grad_clip_min, grad_clip_max)
                     out_mask = connection_ids == 1
                     if out_mask.any():
                         _scatter_updates(delta[out_mask], pre_idx[out_mask], post_idx[out_mask], network.w_hidden_output)
-                        network.w_hidden_output.clamp_(args.grad_clip_min, args.grad_clip_max)
+                        network.w_hidden_output.clamp_(grad_clip_min, grad_clip_max)
 
             total_margin = total_margin + r_margin.sum()
             total_reward = total_reward + r_total.sum()

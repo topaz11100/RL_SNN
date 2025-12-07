@@ -36,7 +36,9 @@ def _grad_mimicry_forward(
         firing_rates = torch.zeros((batch_size, w_layers[-1].size(1)), device=device, dtype=dtype)
         return empty_hidden, empty_output, firing_rates
 
-    current_input_all = torch.matmul(input_spikes.permute(0, 2, 1), w_layers[0])
+    # Use raw weights (no ReLU) so supervised gradients can explore negative values.
+    w_input_hidden = w_layers[0]
+    current_input_all = torch.matmul(input_spikes.permute(0, 2, 1), w_input_hidden)
 
     # 히든 레이어가 없는 경우 (0 hidden layers)
     if n_hidden_layers == 0:
@@ -77,7 +79,8 @@ def _grad_mimicry_forward(
             hidden_spikes_storage[li].append(s_next)
 
         prev_spikes_for_output = s_prev[-1]
-        current_out = torch.matmul(prev_spikes_for_output, w_layers[-1])
+        w_hidden_output = w_layers[-1]
+        current_out = torch.matmul(prev_spikes_for_output, w_hidden_output)
         v_output, s_output = lif_dynamics_bptt(
             v_output, current_out, output_params, slope=surrogate_slope
         )
