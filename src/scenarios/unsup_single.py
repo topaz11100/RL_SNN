@@ -1,13 +1,13 @@
 from pathlib import Path
 from typing import Optional, Tuple
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
 from utils.metrics import (
     compute_neuron_labels,
     evaluate_labeling,
-    plot_delta_t_delta_d,
     plot_receptive_fields,
     plot_weight_histograms,
 )
@@ -116,11 +116,11 @@ def analyze_stdp_profile(
     network: DiehlCookNetwork,
     actor: GaussianPolicy,
     critic: ValueFunction,
-    loader,
     args,
     device: torch.device,
 ) -> None:
     result_dir = resolve_path(args.result_dir)
+    result_dir.mkdir(parents=True, exist_ok=True)
     network_was_training = network.training
     actor_was_training = actor.training
     critic_was_training = critic.training
@@ -128,59 +128,38 @@ def analyze_stdp_profile(
     actor.eval()
     critic.eval()
 
-    try:
-        images, _, _ = next(iter(loader))
-    except StopIteration:
-        return
+    dt_range = torch.arange(-50, 51, device=device)
+    window_size = args.spike_array_len
+    states = torch.zeros((len(dt_range), 2, window_size), device=device)
+    center = window_size // 2
+    states[:, 1, center] = 1.0
+    for idx, dt in enumerate(dt_range):
+        pre_idx = center + int(dt.item())
+        if 0 <= pre_idx < window_size:
+            states[idx, 0, pre_idx] = 1.0
 
-    estimated_events = args.batch_size_images * args.spike_array_len * (784 + args.N_E)
-    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+    weights_to_test = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    dt_cpu = dt_range.cpu().numpy()
+    curves: list[tuple[float, torch.Tensor]] = []
 
     with torch.no_grad():
-        images = images.to(device, non_blocking=True)
-        input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate)
-        exc_spikes, inh_spikes = network(input_spikes)
+        for w_val in weights_to_test:
+            extras = torch.zeros((len(dt_range), actor.extra_feature_dim), device=device)
+            extras[:, 0] = w_val
+            actions, _, _ = actor(states, extras)
+            curves.append((w_val, actions.detach().cpu().view(-1)))
 
-        event_buffer.reset()
-        padded_cache = {}
-
-        def _get_padded(spikes: torch.Tensor) -> torch.Tensor:
-            key = id(spikes)
-            if key not in padded_cache:
-                padded_cache[key] = F.pad(spikes, (args.spike_array_len - 1, 0))
-            return padded_cache[key]
-
-        gather_events(
-            input_spikes,
-            exc_spikes,
-            network.w_input_exc,
-            args.spike_array_len,
-            event_buffer,
-            0,
-            padded_pre=_get_padded(input_spikes),
-            padded_post=_get_padded(exc_spikes),
-        )
-        gather_events(
-            inh_spikes,
-            exc_spikes,
-            network.w_inh_exc,
-            args.spike_array_len,
-            event_buffer,
-            1,
-            valid_mask=network.inh_exc_mask,
-            padded_pre=_get_padded(inh_spikes),
-            padded_post=_get_padded(exc_spikes),
-        )
-
-        if len(event_buffer) > 0:
-            states, extras, *_ = event_buffer.flatten()
-            actions, _, _ = _forward_in_event_batches(
-                actor, critic, states, extras, batch_size=args.event_batch_size
-            )
-            delta_t = _extract_delta_t(states).cpu()
-            delta_d = actions.detach().cpu()
-            if delta_t.numel() > 0 and delta_d.numel() > 0:
-                plot_delta_t_delta_d(delta_t, delta_d, result_dir / "delta_t_delta_d.png")
+    plt.figure(figsize=(8, 6), dpi=200)
+    for w_val, action_vals in curves:
+        plt.plot(dt_cpu, action_vals.numpy(), label=f"w={w_val}")
+    plt.title("Learned STDP Profile by Weight")
+    plt.xlabel("Delta t (steps)")
+    plt.ylabel("Delta w (Action)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(result_dir / "stdp_profile_sweep.png")
+    plt.close()
 
     if network_was_training:
         network.train()
@@ -412,6 +391,6 @@ def run_unsup1(args, logger):
     plot_weight_histograms(w_input_exc_before, network.w_input_exc.detach().cpu(), result_dir / "hist_input_exc.png")
     plot_weight_histograms(w_inh_exc_before, network.w_inh_exc.detach().cpu(), result_dir / "hist_inh_exc.png")
 
-    analyze_stdp_profile(network, actor, critic, train_loader, args, device)
+    analyze_stdp_profile(network, actor, critic, args, device)
 
     plot_receptive_fields(network.w_input_exc.detach().cpu(), result_dir / "receptive_fields.png")
