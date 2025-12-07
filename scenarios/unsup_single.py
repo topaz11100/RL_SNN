@@ -10,7 +10,13 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
-from utils.metrics import compute_neuron_labels, evaluate_labeling, plot_delta_t_delta_d, plot_weight_histograms
+from utils.metrics import (
+    compute_neuron_labels,
+    evaluate_labeling,
+    plot_delta_t_delta_d,
+    plot_receptive_fields,
+    plot_weight_histograms,
+)
 from data.mnist import get_mnist_dataloaders
 
 from rl.buffers import EventBatchBuffer
@@ -376,3 +382,7 @@ def run_unsup1(args, logger):
     )
 
     analyze_stdp_profile(network, actor, critic, train_loader, args, device)
+
+    plot_receptive_fields(
+        network.w_input_exc.detach().cpu(), os.path.join(args.result_dir, "receptive_fields.png")
+    )
