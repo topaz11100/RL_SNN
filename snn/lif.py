@@ -98,23 +98,6 @@ class LIFCell(nn.Module):
 # Part B: Autograd-Compatible LIF (For Supervised BPTT)
 # ==========================================
 
-class SurrogateSpike(torch.autograd.Function):
-    """Standard surrogate gradient spike function."""
-
-    @staticmethod
-    def forward(ctx, input: Tensor, slope: float = 25.0) -> Tensor:  # type: ignore[override]
-        ctx.save_for_backward(input)
-        ctx.slope = slope
-        return (input > 0).float()
-
-    @staticmethod
-    def backward(ctx, grad_output: Tensor):  # type: ignore[override]
-        input, = ctx.saved_tensors
-        slope = ctx.slope
-        sigmoid_val = torch.sigmoid(slope * input)
-        grad_input = grad_output * sigmoid_val * (1 - sigmoid_val) * slope
-        return grad_input, None
-
 
 def lif_dynamics_bptt(
     v: Tensor,
@@ -122,14 +105,20 @@ def lif_dynamics_bptt(
     params: LIFParams,
     slope: float = 25.0,
 ) -> Tuple[Tensor, Tensor]:
-    """LIF dynamics with surrogate gradient for supervised BPTT (no JIT)."""
+    """LIF dynamics with surrogate gradient using PyTorch primitive ops (vmap compatible)."""
+
+    # 1. Integrate voltage
     dt_over_tau = params.dt / params.tau
     dv = (-(v - params.v_rest) + params.R * I) * dt_over_tau
     v_next = v + dv
 
-    spikes = SurrogateSpike.apply(v_next - params.v_th, slope)
+    # 2. Surrogate Spike (Detach Trick)
+    surrogate = torch.sigmoid(slope * (v_next - params.v_th))
+    spike_hard = (v_next >= params.v_th).float()
+    spikes = (spike_hard - surrogate).detach() + surrogate
 
+    # 3. Soft Reset
     v_reset = torch.full_like(v_next, params.v_reset)
-    v_after_reset = torch.where(spikes.to(torch.bool), v_reset, v_next)
+    v_after_reset = torch.where(spikes.detach().to(torch.bool), v_reset, v_next)
 
     return v_after_reset, spikes
