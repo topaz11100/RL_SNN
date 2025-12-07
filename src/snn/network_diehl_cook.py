@@ -28,6 +28,7 @@ def _diehl_cook_forward_script(
     exc_spikes = torch.empty((batch_size, w_input_exc.size(1), T), device=input_spikes.device, dtype=dtype)
     inh_spikes = torch.empty((batch_size, w_inh_exc.size(0), T), device=input_spikes.device, dtype=dtype)
 
+    # Keep raw excitatory weights (no ReLU) so unsupervised learning can shape signs via clipping.
     I_exc_all = torch.matmul(input_spikes.permute(0, 2, 1), w_input_exc)
 
     for t in range(T):

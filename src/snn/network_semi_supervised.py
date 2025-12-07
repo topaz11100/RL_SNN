@@ -26,6 +26,7 @@ def _semi_supervised_forward_script(
     hidden_spikes = torch.empty((batch_size, w_input_hidden.size(1), T), device=input_spikes.device, dtype=dtype)
     output_spikes = torch.empty((batch_size, w_hidden_output.size(1), T), device=input_spikes.device, dtype=dtype)
 
+    # Use raw weights (no ReLU) to allow negative synapses during supervised updates.
     I_hidden_all = torch.matmul(input_spikes.permute(0, 2, 1), w_input_hidden)
 
     for t in range(T):
