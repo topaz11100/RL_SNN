@@ -12,7 +12,7 @@ mkdir -p ../logs
 TS=$(date "+%Y%m%d_%H%M%S")
 
 echo "================================================================"
-echo " Launching unsupervised scenarios (unsup1, unsup2) in parallel  ($TS)"
+echo " Launching unsupervised scenarios (unsup1, unsup2) in serial  ($TS)"
 echo "================================================================"
 
 # GPU가 하나뿐인 PC라면 CUDA_VISIBLE_DEVICES는 생략해도 됨.
@@ -20,11 +20,8 @@ echo "================================================================"
 #   CUDA_VISIBLE_DEVICES=0 nohup ...
 # 아니면 그냥 nohup만 써도 됨.
 
-nohup ./unsup1.sh \
-  > "../logs/unsup1_${TS}.log" 2>&1 &
-
-nohup ./unsup2.sh \
-  > "../logs/unsup2_${TS}.log" 2>&1 &
+nohup ./unsup1.sh > "../logs/unsup1_${TS}.log" 2>&1
+nohup ./unsup2.sh > "../logs/unsup2_${TS}.log" 2>&1
 
 echo "Submitted unsup1, unsup2 (2 jobs) with nohup."
 echo "Check '../logs/unsup*_*.log' and 'nvidia-smi' for progress."
