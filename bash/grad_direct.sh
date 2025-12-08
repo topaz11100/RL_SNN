@@ -6,7 +6,7 @@ set -e
 # ------------------------------------------------------------------------------
 
 SEED=0
-NUM_EPOCHS=2
+NUM_EPOCHS=30
 BATCH_SIZE_IMAGES=16
 EVENTS_PER_IMAGE=2048
 EVENT_BATCH_SIZE=8196
