@@ -1,4 +1,4 @@
-name: snn
+name: rl_snn
 channels:
   - conda-forge
   - defaults
