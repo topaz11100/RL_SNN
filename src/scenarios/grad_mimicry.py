@@ -445,8 +445,11 @@ def run_grad(args, logger):
         agent_tensors = [torch.stack(log) for log in agent_deltas_log if log]
         teacher_tensors = [torch.stack(log) for log in teacher_deltas_log if log]
         if agent_tensors and teacher_tensors:
-            agent_cat = torch.cat(agent_tensors)
-            teacher_cat = torch.cat(teacher_tensors)
-            plot_grad_alignment(agent_cat, teacher_cat, result_dir / "grad_alignment.png")
+            # [수정] 레이어들을 억지로 합치지 않고, 반복문을 돌며 각각 저장합니다.
+            # zip()을 사용해 Agent(학생)와 Teacher(선생)의 같은 층 기록을 짝지어 가져옵니다.
+            for i, (ag, te) in enumerate(zip(agent_tensors, teacher_tensors)):
+                # 파일명에 layer{i}를 붙여 구분합니다 (예: grad_alignment_layer0.png)
+                # plot_grad_alignment 함수 내부에서 자동으로 flatten 하므로 그대로 넘겨도 됩니다.
+                plot_grad_alignment(ag, te, result_dir / f"grad_alignment_layer{i}.png")
 
     analyze_stdp_profile(network, actor, critic, args, device)
