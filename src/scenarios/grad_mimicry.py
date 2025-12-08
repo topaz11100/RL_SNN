@@ -132,7 +132,22 @@ def analyze_stdp_profile(
             extras = torch.zeros((len(dt_range), actor.extra_feature_dim), device=device)
             extras[:, 0] = w_val
             actions, _, _ = actor(states, extras)
-            curves.append((w_val, actions.detach().cpu().view(-1)))
+            
+            # 텐서 변환
+            action_vals = actions.detach().cpu().view(-1)
+            curves.append((w_val, action_vals))
+
+            # [추가됨] w별 개별 그래프 즉시 저장
+            plt.figure(figsize=(6, 5), dpi=100)
+            plt.plot(dt_cpu, action_vals.numpy(), color='blue', label=f"w={w_val}")
+            plt.title(f"STDP Profile (w={w_val})")
+            plt.xlabel("Delta t (steps)")
+            plt.ylabel("Delta w (Action)")
+            plt.grid(True)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(result_dir / f"stdp_profile_w_{w_val}.png") # 파일명 예: stdp_profile_w_-0.5.png
+            plt.close()
 
     plt.figure(figsize=(8, 6), dpi=200)
     for w_val, action_vals in curves:

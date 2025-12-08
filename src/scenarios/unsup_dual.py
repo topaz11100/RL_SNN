@@ -144,13 +144,29 @@ def analyze_stdp_profile(
     dt_cpu = dt_range.cpu().numpy()
 
     def _sweep_and_plot(actor: GaussianPolicy, out_name: str) -> None:
+        # 확장자(.png) 제거 (만약 인자로 "stdp_sweep_exc.png"를 받았다면 "stdp_sweep_exc"만 추출)
+        base_stem = Path(out_name).stem
         curves: list[tuple[float, torch.Tensor]] = []
         with torch.no_grad():
             for w_val in weights_to_test:
                 extras = torch.zeros((len(dt_range), actor.extra_feature_dim), device=device)
                 extras[:, 0] = w_val
                 actions, _, _ = actor(states, extras)
-                curves.append((w_val, actions.detach().cpu().view(-1)))
+                action_vals = actions.detach().cpu().view(-1)
+                curves.append((w_val, action_vals))
+
+                # [추가됨] 개별 그래프 저장
+                plt.figure(figsize=(6, 5), dpi=100)
+                plt.plot(dt_cpu, action_vals.numpy(), color='green', label=f"w={w_val}")
+                plt.title(f"STDP Profile ({base_stem}, w={w_val})")
+                plt.xlabel("Delta t")
+                plt.ylabel("Delta w")
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+                # 파일명 예: stdp_sweep_exc_w_-1.0.png
+                plt.savefig(result_dir / f"{base_stem}_w_{w_val}.png")
+                plt.close()
 
         plt.figure(figsize=(8, 6), dpi=200)
         for w_val, action_vals in curves:
