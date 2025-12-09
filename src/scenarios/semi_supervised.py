@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from data.mnist import get_mnist_dataloaders
-from rl.buffers import EventBatchBuffer
+from rl.buffers import StreamingEventBuffer
 from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
@@ -208,7 +208,9 @@ def run_semi(args, logger):
     _ensure_metrics_file(metrics_test, "epoch\tacc\tmargin\treward")
 
     estimated_events = args.batch_size_images * args.spike_array_len * (784 + args.N_hidden + 10)
-    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+    event_buffer = StreamingEventBuffer(
+        max_batch_size=args.batch_size_images, max_events_per_image=args.events_per_image, device=device
+    )
 
     s_scen = 1.0
     w_clip_min = args.w_clip_min
@@ -229,8 +231,8 @@ def run_semi(args, logger):
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
             sample_increment = labels.new_full((), batch_size, dtype=torch.float32)
-            total_samples = total_samples + sample_increment
-            total_correct = total_correct + (preds == labels).sum()
+            total_samples = total_samples + sample_increment.detach()
+            total_correct = total_correct + (preds == labels).sum().detach()
 
             r_cls, r_margin, r_total = _compute_reward_components(firing_rates, labels, args.beta_margin)
 
@@ -265,8 +267,6 @@ def run_semi(args, logger):
                 padded_pre=_get_padded(hidden_spikes),
                 padded_post=_get_padded(output_spikes),
             )
-
-            event_buffer.subsample_per_image(args.events_per_image)
 
             rewards_tensor = r_total.detach()
 
@@ -328,8 +328,8 @@ def run_semi(args, logger):
                         _scatter_updates(delta[out_mask], pre_idx[out_mask], post_idx[out_mask], network.w_hidden_output)
                         network.w_hidden_output.clamp_(w_clip_min, w_clip_max)
 
-            total_margin = total_margin + r_margin.sum()
-            total_reward = total_reward + r_total.sum()
+            total_margin = total_margin + r_margin.sum().detach()
+            total_reward = total_reward + r_total.sum().detach()
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 batch_acc = (preds == labels).float().mean().item()

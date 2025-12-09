@@ -13,7 +13,7 @@ from utils.metrics import (
 )
 from data.mnist import get_mnist_dataloaders
 
-from rl.buffers import EventBatchBuffer
+from rl.buffers import StreamingEventBuffer
 from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
@@ -213,7 +213,9 @@ def run_unsup1(args, logger):
     _ensure_eval_file(metrics_test)
 
     estimated_events = args.batch_size_images * args.spike_array_len * (784 + args.N_E)
-    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+    event_buffer = StreamingEventBuffer(
+        max_batch_size=args.batch_size_images, max_events_per_image=args.events_per_image, device=device
+    )
 
     s_scen = 1.0
     pos_reward = torch.tensor(1.0, device=device)
@@ -293,11 +295,9 @@ def run_unsup1(args, logger):
                 padded_post=_get_padded(exc_spikes),
             )
 
-            event_buffer.subsample_per_image(args.events_per_image)
-
             batch_size = winners.numel()
             sample_increment = winners.new_full((), batch_size, dtype=torch.float32)
-            total_samples = total_samples + sample_increment
+            total_samples = total_samples + sample_increment.detach()
             total_sparse = total_sparse + r_sparse.sum().detach()
             total_div = total_div + r_div.sum().detach()
             total_stab = total_stab + r_stab.sum().detach()
