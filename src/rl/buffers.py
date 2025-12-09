@@ -54,198 +54,105 @@ class EpisodeBuffer:
         return len(self.states)
 
 
-class EventBatchBuffer:
-    """GPU 친화적 이벤트 버퍼.
+class StreamingEventBuffer:
+    def __init__(self, max_batch_size: int, max_events_per_image: int, device: torch.device):
+        self.max_batch_size = max_batch_size
+        self.k = max_events_per_image
+        self.device = device
 
-    Theory 2.9.3의 이미지 단위 미니배치 구성을 유지하면서도, 리스트 append로
-    인한 메모리 파편화를 줄이기 위해 고정 크기 블록을 미리 할당하고 필요
-    시 두 배 확장한다. 동일한 디바이스/데이터타입을 일관되게 유지하여
-    연속적인 GPU 메모리 배치를 보장한다.
-    """
+        # Track total events seen per image in the batch
+        self.seen_counts = torch.zeros(max_batch_size, device=device, dtype=torch.long)
 
-    def __init__(self, initial_capacity: int = 4096):
-        # Generous preallocation minimizes cudaMalloc/cudaFree churn during training
-        self.initial_capacity = initial_capacity
-        self.capacity = 0
-        self.length = 0
+        # Pre-allocated memory slots (Initialized lazily on first add to get dtype/shapes)
+        self.states = None
+        self.extras = None
+        self.connection_ids = None
+        self.pre_indices = None
+        self.post_indices = None
+        self.batch_indices = None
 
-        self.states: torch.Tensor | None = None
-        self.extras: torch.Tensor | None = None
-        self.batch_indices: torch.Tensor | None = None
-        self.connection_ids: torch.Tensor | None = None
-        self.pre_indices: torch.Tensor | None = None
-        self.post_indices: torch.Tensor | None = None
-
-    def _allocate(
-        self,
-        count: int,
-        state_shape: torch.Size,
-        extras_dim: int,
-        device,
-        dtype,
-        extras_dtype,
-    ) -> None:
-        self.capacity = max(self.initial_capacity, count)
-        self.states = torch.empty((self.capacity, *state_shape[1:]), device=device, dtype=dtype)
-        self.extras = torch.empty((self.capacity, extras_dim), device=device, dtype=extras_dtype)
-        self.batch_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
-        self.connection_ids = torch.empty((self.capacity,), device=device, dtype=torch.long)
-        self.pre_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
-        self.post_indices = torch.empty((self.capacity,), device=device, dtype=torch.long)
-
-    def _ensure_capacity(self, additional: int) -> None:
-        if self.states is None:
-            raise RuntimeError("Buffer not allocated")
-        needed = self.length + additional
-        if needed <= self.capacity:
+    def _lazy_init(self, state_ex: torch.Tensor, extras_ex: torch.Tensor):
+        if self.states is not None:
             return
-        new_capacity = max(needed, int(self.capacity * 1.2))
+        # Strictly fixed allocation
+        self.states = torch.zeros((self.max_batch_size, self.k, *state_ex.shape[1:]),
+                                  device=self.device, dtype=state_ex.dtype)
+        extras_dim = extras_ex.shape[1] if extras_ex.numel() > 0 else 0
+        self.extras = torch.zeros((self.max_batch_size, self.k, extras_dim),
+                                  device=self.device, dtype=extras_ex.dtype if extras_dim > 0 else torch.float32)
+        self.connection_ids = torch.full((self.max_batch_size, self.k), -1, device=self.device, dtype=torch.long)
+        self.pre_indices = torch.zeros((self.max_batch_size, self.k), device=self.device, dtype=torch.long)
+        self.post_indices = torch.zeros((self.max_batch_size, self.k), device=self.device, dtype=torch.long)
+        # Helper for flattening later
+        self.batch_indices = torch.arange(self.max_batch_size, device=self.device, dtype=torch.long).unsqueeze(1).expand(-1, self.k)
 
-        def _grow(storage: torch.Tensor, shape_tail: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-            new_tensor = torch.empty((new_capacity, *shape_tail), device=storage.device, dtype=dtype)
-            new_tensor[: self.length].copy_(storage[: self.length])
-            return new_tensor
-
-        self.states = _grow(self.states, tuple(self.states.shape[1:]), self.states.dtype)
-        self.extras = _grow(self.extras, (self.extras.size(1),), self.extras.dtype)
-        self.batch_indices = _grow(self.batch_indices, (), self.batch_indices.dtype)
-        self.connection_ids = _grow(self.connection_ids, (), self.connection_ids.dtype)
-        self.pre_indices = _grow(self.pre_indices, (), self.pre_indices.dtype)
-        self.post_indices = _grow(self.post_indices, (), self.post_indices.dtype)
-        self.capacity = new_capacity
-
-    def reserve(
-        self,
-        count: int,
-        *,
-        state_shape: torch.Size,
-        extras_dim: int,
-        device,
-        state_dtype: torch.dtype,
-        extras_dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Ensure capacity for ``count`` events and return writable slices.
-
-        The buffer length is advanced eagerly to avoid re-checking capacity for
-        every sub-block within a single gather call.
-        """
-
-        if count == 0:
-            empty = torch.empty((0,), device=device, dtype=torch.long)
-            empty_states = torch.empty((0, *state_shape[1:]), device=device, dtype=state_dtype)
-            empty_extras = torch.empty((0, extras_dim), device=device, dtype=extras_dtype)
-            return empty_states, empty_extras, empty, empty, empty, empty
-
-        if self.states is None:
-            self._allocate(count, state_shape, extras_dim, device, state_dtype, extras_dtype)
-        else:
-            if self.states.shape[1:] != state_shape[1:]:
-                raise ValueError("State shape mismatch for EventBatchBuffer")
-            if self.extras.size(1) != extras_dim:
-                raise ValueError("Extras dimension mismatch for EventBatchBuffer")
-            self._ensure_capacity(count)
-
-        start = self.length
-        end = start + count
-        self.length = end
-
-        states_view = self.states[start:end]
-        extras_view = self.extras[start:end]
-        batch_view = self.batch_indices[start:end]
-        conn_view = self.connection_ids[start:end]
-        pre_view = self.pre_indices[start:end]
-        post_view = self.post_indices[start:end]
-        return states_view, extras_view, conn_view, pre_view, post_view, batch_view
-
-    def add(
-        self,
-        connection_id: int,
-        states: torch.Tensor,
-        extras: torch.Tensor,
-        pre_idx: torch.Tensor,
-        post_idx: torch.Tensor,
-        batch_idx: torch.Tensor,
-    ) -> None:
+    def add(self, connection_id, states, extras, pre_idx, post_idx, batch_idx):
         if states.numel() == 0:
             return
+        self._lazy_init(states, extras)
 
-        states_view, extras_view, conn_view, pre_view, post_view, batch_view = self.reserve(
-            states.size(0),
-            state_shape=states.shape,
-            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
-            device=states.device,
-            state_dtype=states.dtype,
-            extras_dtype=extras.dtype if extras.numel() > 0 else states.dtype,
-        )
-
-        states_view.copy_(states.detach())
-        if extras_view.numel() > 0:
-            extras_view.copy_(extras.detach())
-        conn_view.fill_(connection_id)
-        pre_view.copy_(pre_idx)
-        post_view.copy_(post_idx)
-        batch_view.copy_(batch_idx.to(device=states.device, dtype=torch.long))
-
-    def flatten(self, allow_empty: bool = False) -> Tuple[torch.Tensor, ...]:
-        if self.states is None or self.length == 0:
-            if allow_empty:
-                empty_states = torch.empty(0, device="cpu")
-                empty_long = torch.empty(0, dtype=torch.long)
-                return empty_states, empty_states, empty_long, empty_long, empty_long, empty_long
-            raise ValueError("No events were added to the buffer")
-
-        states = self.states[: self.length]
-        extras = self.extras[: self.length]
-        connection_ids = self.connection_ids[: self.length]
-        pre_idx = self.pre_indices[: self.length]
-        post_idx = self.post_indices[: self.length]
-        batch_idx = self.batch_indices[: self.length]
-        return states, extras, connection_ids, pre_idx, post_idx, batch_idx
-
-    def subsample_per_image(self, k: int) -> None:
-        """Reservoir-style subsampling to keep at most ``k`` events per image.
-
-        This enforces the per-image cap described in Theory 2.9.3 to prevent
-        oversized PPO updates. The operation is in-place and keeps storage
-        allocation intact for reuse across batches.
-        """
-
-        if self.states is None or self.length == 0:
-            return
-
-        if k <= 0:
-            self.length = 0
-            return
-
-        batch_idx = self.batch_indices[: self.length]
         unique_batches = torch.unique(batch_idx)
-
-        keep_mask = torch.zeros(self.length, device=batch_idx.device, dtype=torch.bool)
         for b in unique_batches:
-            indices = (batch_idx == b).nonzero(as_tuple=False).squeeze(1)
-            if indices.numel() > k:
-                perm = torch.randperm(indices.numel(), device=batch_idx.device)[:k]
-                indices = indices[perm]
-            keep_mask[indices] = True
+            mask = (batch_idx == b)
+            curr_states = states[mask]
+            if curr_states.numel() == 0:
+                continue
 
-        keep_indices = keep_mask.nonzero(as_tuple=False).squeeze(1)
-        new_length = keep_indices.numel()
-        if new_length == self.length:
-            return
+            n_new = curr_states.shape[0]
+            n_seen = self.seen_counts[b].item()
 
-        self.states[:new_length].copy_(self.states[keep_indices])
-        if self.extras is not None:
-            self.extras[:new_length].copy_(self.extras[keep_indices])
-        self.batch_indices[:new_length].copy_(self.batch_indices[keep_indices])
-        self.connection_ids[:new_length].copy_(self.connection_ids[keep_indices])
-        self.pre_indices[:new_length].copy_(self.pre_indices[keep_indices])
-        self.post_indices[:new_length].copy_(self.post_indices[keep_indices])
+            # Global indices for incoming events: n_seen+1, n_seen+2, ...
+            indices = torch.arange(n_new, device=self.device) + n_seen
 
-        self.length = new_length
+            # 1. Fill empty slots
+            direct_mask = (indices < self.k)
+            if direct_mask.any():
+                write_idx = indices[direct_mask].long()
+                # Direct Write
+                self.states[b, write_idx] = curr_states[direct_mask]
+                if self.extras.shape[-1] > 0:
+                    self.extras[b, write_idx] = extras[mask][direct_mask]
+                self.connection_ids[b, write_idx] = connection_id
+                self.pre_indices[b, write_idx] = pre_idx[mask][direct_mask]
+                self.post_indices[b, write_idx] = post_idx[mask][direct_mask]
 
-    def reset(self) -> None:
-        """Reuse the allocated storage without freeing GPU memory."""
-        self.length = 0
+            # 2. Reservoir Replacement (Algorithm L)
+            overflow_mask = ~direct_mask
+            if overflow_mask.any():
+                # Prob = k / (current_index + 1)
+                current_global_indices = indices[overflow_mask].float() + 1.0
+                probs = self.k / current_global_indices
+                keep_decisions = torch.rand(probs.shape, device=self.device) < probs
 
-    def __len__(self) -> int:
-        return self.length
+                if keep_decisions.any():
+                    num_replace = keep_decisions.sum()
+                    replace_locs = torch.randint(0, self.k, (num_replace,), device=self.device)
+
+                    # Map back to source indices
+                    overflow_indices_local = torch.nonzero(overflow_mask, as_tuple=True)[0]
+                    valid_src_indices = overflow_indices_local[torch.nonzero(keep_decisions, as_tuple=True)[0]]
+
+                    self.states[b, replace_locs] = curr_states[valid_src_indices]
+                    if self.extras.shape[-1] > 0:
+                        self.extras[b, replace_locs] = extras[mask][valid_src_indices]
+                    self.connection_ids[b, replace_locs] = connection_id
+                    self.pre_indices[b, replace_locs] = pre_idx[mask][valid_src_indices]
+                    self.post_indices[b, replace_locs] = post_idx[mask][valid_src_indices]
+
+            self.seen_counts[b] += n_new
+
+    def flatten(self):
+        # Return only valid filled slots
+        if self.states is None:
+            raise ValueError("Buffer empty")
+        valid_counts = torch.clamp(self.seen_counts, max=self.k)
+        range_tensor = torch.arange(self.k, device=self.device).unsqueeze(0)
+        mask = range_tensor < valid_counts.unsqueeze(1)
+        return (self.states[mask], self.extras[mask], self.connection_ids[mask],
+                self.pre_indices[mask], self.post_indices[mask], self.batch_indices[mask])
+
+    def reset(self):
+        self.seen_counts.zero_()
+
+    def __len__(self):
+        return int(torch.clamp(self.seen_counts, max=self.k).sum().item())

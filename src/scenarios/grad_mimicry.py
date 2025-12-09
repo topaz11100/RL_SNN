@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.func import functional_call, grad, vmap
 
 from data.mnist import get_mnist_dataloaders
-from rl.buffers import EventBatchBuffer
+from rl.buffers import StreamingEventBuffer
 from rl.policy import GaussianPolicy
 from rl.ppo import ppo_update_events
 from rl.value import ValueFunction
@@ -207,7 +207,9 @@ def run_grad(args, logger):
     layer_norms = _layer_indices(len(network.w_layers), args.layer_index_scale)
     synapse_pre_sum = sum(shape[0] for shape in network.synapse_shapes)
     estimated_events = args.batch_size_images * args.spike_array_len * synapse_pre_sum
-    event_buffer = EventBatchBuffer(initial_capacity=max(100_000, estimated_events))
+    event_buffer = StreamingEventBuffer(
+        max_batch_size=args.batch_size_images, max_events_per_image=args.events_per_image, device=device
+    )
 
     max_batch_size = args.batch_size_images
     update_buffers = [
@@ -269,8 +271,8 @@ def run_grad(args, logger):
             preds = firing_rates.argmax(dim=1)
             batch_size = labels.numel()
             sample_increment = labels.new_full((), batch_size, dtype=torch.float32)
-            total_samples = total_samples + sample_increment
-            total_correct = total_correct + (preds == labels).sum()
+            total_samples = total_samples + sample_increment.detach()
+            total_correct = total_correct + (preds == labels).sum().detach()
 
             event_buffer.reset()
 
@@ -311,8 +313,6 @@ def run_grad(args, logger):
                 padded_pre=_get_padded(prev_spikes),
                 padded_post=_get_padded(output_spikes),
             )
-
-            event_buffer.subsample_per_image(args.events_per_image)
 
             rewards = torch.zeros(input_spikes.size(0), device=device)
 
@@ -404,16 +404,16 @@ def run_grad(args, logger):
                         agent_deltas_log[li].append(agent_deltas[li].sum(dim=0).detach().cpu())
                         teacher_deltas_log[li].append(teacher_deltas[li].sum(dim=0).detach().cpu())
 
-                total_reward = total_reward + rewards.sum()
-                total_align = total_align + rewards.sum()
-                total_active = total_active + active_ratio
-                active_batches = active_batches + ones_scalar
+                total_reward = total_reward + rewards.sum().detach()
+                total_align = total_align + rewards.sum().detach()
+                total_active = total_active + active_ratio.detach()
+                active_batches = active_batches + ones_scalar.detach()
             else:
                 zero_reward_sum = torch.zeros((), device=device)
-                total_reward = total_reward + zero_reward_sum
-                total_align = total_align + zero_reward_sum
-                total_active = total_active + torch.zeros((), device=device)
-                active_batches = active_batches + ones_scalar
+                total_reward = total_reward + zero_reward_sum.detach()
+                total_align = total_align + zero_reward_sum.detach()
+                total_active = total_active + torch.zeros((), device=device).detach()
+                active_batches = active_batches + ones_scalar.detach()
 
             if args.log_interval > 0 and batch_idx % args.log_interval == 0:
                 batch_acc = (preds == labels).float().mean().item()

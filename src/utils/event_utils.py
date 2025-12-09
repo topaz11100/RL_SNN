@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from rl.buffers import EventBatchBuffer
+from rl.buffers import StreamingEventBuffer
 
 _EVENT_TYPE_PRE = torch.tensor([1.0, 0.0])
 _EVENT_TYPE_POST = torch.tensor([0.0, 1.0])
@@ -71,7 +71,7 @@ def gather_events(
     post_spikes: torch.Tensor,
     weights: torch.Tensor,
     window: int,
-    buffer: EventBatchBuffer,
+    buffer: StreamingEventBuffer,
     connection_id: int,
     *,
     l_norm: float | None = None,
@@ -96,23 +96,14 @@ def gather_events(
 
     # 내부 저장 함수
     def _write_events(states: torch.Tensor, extras: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, batch_idx: torch.Tensor) -> None:
-        states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
-            states.size(0),
-            state_shape=states.shape,
-            extras_dim=extras.size(1) if extras.numel() > 0 else 0,
-            device=device,
-            state_dtype=states.dtype,
-            extras_dtype=extras.dtype if extras.numel() > 0 else weight_snapshot.dtype,
+        buffer.add(
+            connection_id,
+            states,
+            extras,
+            pre_idx,
+            post_idx,
+            batch_idx,
         )
-        if states_view.numel() == 0:
-            return
-        states_view.copy_(states)
-        if extras_view.numel() > 0:
-            extras_view.copy_(extras)
-        conn_view.fill_(connection_id)
-        pre_view.copy_(pre_idx)
-        post_view.copy_(post_idx)
-        batch_view.copy_(batch_idx)
 
     if valid_mask is not None:
         valid_mask = valid_mask.to(device=device, dtype=torch.bool)
