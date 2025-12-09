@@ -1,0 +1,2 @@
+epoch	acc	reward	align
+1	0.098000	0.000000	0.000000

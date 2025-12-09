@@ -6,19 +6,20 @@ set -e
 # ------------------------------------------------------------------------------
 
 SEED=0
-NUM_EPOCHS=30
+NUM_EPOCHS=15
 BATCH_SIZE_IMAGES=16
-EVENTS_PER_IMAGE=4096
-EVENT_BATCH_SIZE=65536
-PPO_BATCH_SIZE=4096
+EVENTS_PER_IMAGE=1024
+EVENT_BATCH_SIZE=16284
+PPO_BATCH_SIZE=1024
 
 PPO_EPS=0.2
 PPO_EPOCHS=2
 
 DT=1.0
-T_SUP_DIRECT=5
-SPIKE_LEN_SUP_DIRECT=3
+T_SUP_DIRECT=15
+SPIKE_LEN_SUP_DIRECT=5
 
+MAX_RATE=0.25
 SIGMA_SUP=0.1
 
 ALPHA_ALIGN=0.1
@@ -64,6 +65,7 @@ python ../src/main.py \
     --T-sup "$T_SUP_DIRECT" \
     --spike-array-len "$SPIKE_LEN_SUP_DIRECT" \
     --dt "$DT" \
+    --max-rate "$MAX_RATE" \
     --sigma-sup "$SIGMA_SUP" \
     --alpha-align "$ALPHA_ALIGN" \
     --layer-index-scale "$LAYER_INDEX_SCALE" \

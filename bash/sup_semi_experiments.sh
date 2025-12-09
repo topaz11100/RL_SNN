@@ -21,7 +21,7 @@ echo "================================================================"
 # 마찬가지로 GPU 하나뿐이면 CUDA_VISIBLE_DEVICES 생략 가능.
 # 필요하면 앞에 CUDA_VISIBLE_DEVICES=0 붙여서 명시.
 
-nohup ./semi.sh > "../logs/semi_${TS}.log" 2>&1
+nohup ./semi.sh > "../logs/semi_${TS}.log" 2>&1 &
 
 nohup ./grad_direct.sh > "../logs/grad_direct_${TS}.log" 2>&1 &
 nohup ./grad_poisson.sh > "../logs/grad_poisson_${TS}.log" 2>&1 &

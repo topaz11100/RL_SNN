@@ -1,0 +1,4 @@
+before_mean	0.051548
+before_std	0.029655
+after_mean	0.042291
+after_std	0.037194

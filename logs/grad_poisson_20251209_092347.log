@@ -1,0 +1,63 @@
+----------------------------------------------------------------
+[RUNNING] Scenario: grad (poisson input)
+          Run Name: grad_poisson_20251209_092347
+          Start   : 20251209_092347
+----------------------------------------------------------------
+2025-12-09 09:23:50,275 - INFO - Args: {'scenario': 'grad', 'seed': 0, 'batch_size_images': 16, 'event_batch_size': 65536, 'events_per_image': 4096, 'run_name': 'grad_poisson_20251209_092347', 'log_interval': 125, 'num_epochs': 30, 'T_unsup1': 100, 'T_unsup2': 100, 'T_semi': 100, 'T_sup': 50, 'spike_array_len': 16, 'sigma_unsup1': 0.1, 'sigma_unsup2': 0.1, 'sigma_semi': 0.1, 'sigma_sup': 0.1, 'N_E': 100, 'N_hidden': 256, 'dt': 1.0, 'layer_index_scale': 1.0, 'lr_actor': 0.001, 'lr_critic': 0.001, 'ppo_eps': 0.2, 'ppo_epochs': 2, 'ppo_batch_size': 4096, 'exc_clip_min': 0.0, 'exc_clip_max': 1.0, 'w_clip_min': -1.0, 'w_clip_max': 1.0, 'inh_clip_min': 0.0, 'inh_clip_max': 1.0, 'local_lr': 0.01, 'rho_target': 0.1, 'alpha_sparse': 1.0, 'alpha_div': 0.1, 'alpha_stab': 0.1, 'beta_margin': 0.5, 'alpha_align': 0.1, 'max_rate': 0.25, 'sup_input_encoding': 'poisson', 'log_gradient_stats': False, 'result_dir': '/home/yongokhan/바탕화면/snn/RL_SNN/results/grad/grad_poisson_20251209_092347', 'log_dir': '/home/yongokhan/바탕화면/snn/RL_SNN/results/grad/grad_poisson_20251209_092347'}
+2025-12-09 09:23:50,275 - INFO - Starting scenario: grad
+2025-12-09 09:23:50,275 - INFO - Results will be saved to: /home/yongokhan/바탕화면/snn/RL_SNN/results/grad/grad_poisson_20251209_092347
+2025-12-09 09:23:50,275 - INFO - Logs will be saved to: /home/yongokhan/바탕화면/snn/RL_SNN/results/grad/grad_poisson_20251209_092347
+2025-12-09 09:24:37,658 - INFO - Epoch 1 | Batch 125/3375 | Acc 0.2500 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:25:23,745 - INFO - Epoch 1 | Batch 250/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:26:10,213 - INFO - Epoch 1 | Batch 375/3375 | Acc 0.3125 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:26:56,733 - INFO - Epoch 1 | Batch 500/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:27:43,284 - INFO - Epoch 1 | Batch 625/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:28:29,699 - INFO - Epoch 1 | Batch 750/3375 | Acc 0.2500 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:29:16,287 - INFO - Epoch 1 | Batch 875/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:30:02,795 - INFO - Epoch 1 | Batch 1000/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:30:49,463 - INFO - Epoch 1 | Batch 1125/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:31:36,148 - INFO - Epoch 1 | Batch 1250/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:32:22,763 - INFO - Epoch 1 | Batch 1375/3375 | Acc 0.1875 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:33:09,330 - INFO - Epoch 1 | Batch 1500/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:33:55,994 - INFO - Epoch 1 | Batch 1625/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:34:42,516 - INFO - Epoch 1 | Batch 1750/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:35:29,157 - INFO - Epoch 1 | Batch 1875/3375 | Acc 0.0000 | Reward -0.0000 | Active 0.0154
+2025-12-09 09:36:15,754 - INFO - Epoch 1 | Batch 2000/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:37:02,292 - INFO - Epoch 1 | Batch 2125/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:37:48,907 - INFO - Epoch 1 | Batch 2250/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:38:35,267 - INFO - Epoch 1 | Batch 2375/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:39:21,846 - INFO - Epoch 1 | Batch 2500/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0155
+2025-12-09 09:40:08,340 - INFO - Epoch 1 | Batch 2625/3375 | Acc 0.1875 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:40:54,895 - INFO - Epoch 1 | Batch 2750/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:41:41,685 - INFO - Epoch 1 | Batch 2875/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:42:28,380 - INFO - Epoch 1 | Batch 3000/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:43:14,875 - INFO - Epoch 1 | Batch 3125/3375 | Acc 0.0000 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:44:01,111 - INFO - Epoch 1 | Batch 3250/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0156
+2025-12-09 09:44:47,178 - INFO - Epoch 1 | Batch 3375/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0157
+2025-12-09 09:46:03,732 - INFO - Epoch 2 | Batch 125/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:46:51,287 - INFO - Epoch 2 | Batch 250/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0158
+2025-12-09 09:47:41,000 - INFO - Epoch 2 | Batch 375/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0159
+2025-12-09 09:48:30,976 - INFO - Epoch 2 | Batch 500/3375 | Acc 0.1250 | Reward -0.0000 | Active 0.0160
+2025-12-09 09:49:23,071 - INFO - Epoch 2 | Batch 625/3375 | Acc 0.0000 | Reward -0.0000 | Active 0.0161
+2025-12-09 09:50:16,771 - INFO - Epoch 2 | Batch 750/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0162
+2025-12-09 09:51:16,992 - INFO - Epoch 2 | Batch 875/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0162
+2025-12-09 09:52:19,940 - INFO - Epoch 2 | Batch 1000/3375 | Acc 0.0625 | Reward -0.0000 | Active 0.0164
+2025-12-09 09:53:36,186 - INFO - Epoch 2 | Batch 1125/3375 | Acc 0.0000 | Reward -0.0000 | Active 0.0166
+Traceback (most recent call last):
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/bash/../src/main.py", line 43, in <module>
+    main()
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/bash/../src/main.py", line 39, in main
+    runner(args, logger)
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/scenarios/grad_mimicry.py", line 288, in run_grad
+    gather_events(
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/utils/event_utils.py", line 190, in gather_events
+    _write_events(states, extras, pre_rep, post_rep, batch_rep)
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/utils/event_utils.py", line 102, in _write_events
+    states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/rl/buffers.py", line 146, in reserve
+    self._ensure_capacity(count)
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/rl/buffers.py", line 113, in _ensure_capacity
+    self.pre_indices = _grow(self.pre_indices, (), self.pre_indices.dtype)
+  File "/home/yongokhan/바탕화면/snn/RL_SNN/src/rl/buffers.py", line 105, in _grow
+    new_tensor = torch.empty((new_capacity, *shape_tail), device=storage.device, dtype=dtype)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 632.00 MiB. GPU 0 has a total capacity of 11.63 GiB of which 399.12 MiB is free. Process 14494 has 2.54 GiB memory in use. Including non-PyTorch memory, this process has 8.66 GiB memory in use. Of the allocated memory 8.45 GiB is allocated by PyTorch, and 72.33 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
