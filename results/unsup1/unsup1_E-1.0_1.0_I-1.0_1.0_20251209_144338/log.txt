@@ -1,0 +1,9 @@
+2025-12-09 14:43:41,109 - INFO - Args: {'scenario': 'unsup1', 'seed': 0, 'batch_size_images': 16, 'event_batch_size': 16284, 'events_per_image': 1024, 'run_name': 'unsup1_E-1.0_1.0_I-1.0_1.0_20251209_144338', 'log_interval': 125, 'num_epochs': 15, 'T_unsup1': 100, 'T_unsup2': 100, 'T_semi': 100, 'T_sup': 100, 'spike_array_len': 25, 'sigma_unsup1': 0.1, 'sigma_unsup2': 0.1, 'sigma_semi': 0.1, 'sigma_sup': 0.1, 'N_E': 300, 'N_hidden': 256, 'dt': 1.0, 'layer_index_scale': 1.0, 'lr_actor': 0.001, 'lr_critic': 0.001, 'ppo_eps': 0.2, 'ppo_epochs': 2, 'ppo_batch_size': 1024, 'exc_clip_min': -1.0, 'exc_clip_max': 1.0, 'w_clip_min': 0.0, 'w_clip_max': 1.0, 'inh_clip_min': -1.0, 'inh_clip_max': 1.0, 'local_lr': 0.01, 'rho_target': 0.25, 'alpha_sparse': 0.4, 'alpha_div': 0.4, 'alpha_stab': 0.2, 'beta_margin': 0.5, 'alpha_align': 0.1, 'max_rate': 0.25, 'sup_input_encoding': 'poisson', 'log_gradient_stats': False, 'result_dir': '/home/yongokhan/바탕화면/RL_SNN/results/unsup1/unsup1_E-1.0_1.0_I-1.0_1.0_20251209_144338', 'log_dir': '/home/yongokhan/바탕화면/RL_SNN/results/unsup1/unsup1_E-1.0_1.0_I-1.0_1.0_20251209_144338'}
+2025-12-09 14:43:41,110 - INFO - Starting scenario: unsup1
+2025-12-09 14:43:41,110 - INFO - Results will be saved to: /home/yongokhan/바탕화면/RL_SNN/results/unsup1/unsup1_E-1.0_1.0_I-1.0_1.0_20251209_144338
+2025-12-09 14:43:41,110 - INFO - Logs will be saved to: /home/yongokhan/바탕화면/RL_SNN/results/unsup1/unsup1_E-1.0_1.0_I-1.0_1.0_20251209_144338
+2025-12-09 14:44:24,263 - INFO - Epoch 1/15 | Batch 125/3375
+2025-12-09 14:45:06,496 - INFO - Epoch 1/15 | Batch 250/3375
+2025-12-09 14:45:48,973 - INFO - Epoch 1/15 | Batch 375/3375
+2025-12-09 14:46:30,611 - INFO - Epoch 1/15 | Batch 500/3375
+2025-12-09 14:47:10,025 - INFO - Epoch 1/15 | Batch 625/3375

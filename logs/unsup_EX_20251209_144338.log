@@ -1,0 +1,6 @@
+nohup: 입력 무시
+================================================================
+ Launching unsupervised scenarios (unsup1, unsup2) in serial  (20251209_144338)
+================================================================
+Submitted unsup1, unsup2 (2 jobs) with nohup.
+Check '../logs/unsup*_*.log' and 'nvidia-smi' for progress.

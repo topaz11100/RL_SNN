@@ -20,7 +20,7 @@ echo "================================================================"
 #   CUDA_VISIBLE_DEVICES=0 nohup ...
 # 아니면 그냥 nohup만 써도 됨.
 
-#nohup ./unsup2.sh > "../logs/unsup2_${TS}.log" 2>&1 &
+nohup ./unsup2.sh > "../logs/unsup2_${TS}.log" 2>&1 &
 nohup ./unsup1.sh > "../logs/unsup1_${TS}.log" 2>&1 &
 
 echo "Submitted unsup1, unsup2 (2 jobs) with nohup."

@@ -1,2 +1,0 @@
-epoch	R_sparse	R_div	R_stab	R_total
-1	-0.019904	-0.159787	0.000000	-0.071876

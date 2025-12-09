@@ -1,2 +1,1 @@
 epoch	accuracy
-1	0.098000
