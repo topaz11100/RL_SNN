@@ -66,7 +66,6 @@ def _build_states_and_extras(
     extras = torch.cat(extras_parts, dim=1)
     return states, extras
 
-
 def gather_events(
     pre_spikes: torch.Tensor,
     post_spikes: torch.Tensor,
@@ -79,25 +78,23 @@ def gather_events(
     valid_mask: torch.Tensor | None = None,
     padded_pre: torch.Tensor | None = None,
     padded_post: torch.Tensor | None = None,
-    max_pairs: int = 131072,
+    max_events_per_image: int = 1024, # [중요] 기본값 설정 또는 args에서 받아야 함
 ) -> None:
-    """Sparse 이벤트를 직접 ``EventBatchBuffer``에 기록한다.
-
-    GPU OOM을 피하기 위해 이미지(배치) 단위로 이벤트를 생성하여 커다란
-    repeat_interleave 텐서를 생성하지 않는다. `weights`는 호출 시점의 값을
-    detach하여 Actor가 시뮬레이션 당시 가중치에 대한 extras를 받도록
-    명시적으로 보장한다.
+    """
+    Sparse 이벤트를 수집한다. 
+    수정됨: OOM 방지를 위해 이벤트 생성 '전'에 인덱스 레벨에서 샘플링을 수행함.
     """
 
     device = pre_spikes.device
-    _ = max_pairs  # Legacy argument retained for API compatibility.
     n_pre = pre_spikes.shape[1]
     n_post = post_spikes.shape[1]
 
+    # 패딩은 한 번만 수행 (참조용)
     padded_pre = padded_pre if padded_pre is not None else F.pad(pre_spikes, (window - 1, 0))
     padded_post = padded_post if padded_post is not None else F.pad(post_spikes, (window - 1, 0))
     weight_snapshot = weights.detach()
 
+    # 내부 저장 함수
     def _write_events(states: torch.Tensor, extras: torch.Tensor, pre_idx: torch.Tensor, post_idx: torch.Tensor, batch_idx: torch.Tensor) -> None:
         states_view, extras_view, conn_view, pre_view, post_view, batch_view = buffer.reserve(
             states.size(0),
@@ -124,33 +121,50 @@ def gather_events(
     post_all = torch.arange(n_post, device=device)
     pre_all = torch.arange(n_pre, device=device)
 
+    # --- 배치 단위 루프 ---
     for batch in range(batch_size):
         batch_tensor = torch.tensor(batch, device=device, dtype=torch.long)
 
+        # 1. Pre-synaptic 이벤트 처리
         pre_mask = pre_spikes[batch].to(torch.bool)
         pre_idx_single, time_pre = pre_mask.nonzero(as_tuple=True)
+        
         if pre_idx_single.numel() > 0:
+            # 전체 가능한 조합 생성 (아직 텐서 값은 가벼운 Long 타입)
             pre_rep = pre_idx_single.repeat_interleave(n_post)
             post_rep = post_all.repeat(pre_idx_single.numel())
-            batch_rep = batch_tensor.expand(pre_rep.size(0))
             time_rep = time_pre.repeat_interleave(n_post)
-
+            
+            # 마스크 필터링 (유효하지 않은 연결 제거)
             if valid_mask is not None:
                 keep = valid_mask[pre_rep, post_rep]
                 pre_rep = pre_rep[keep]
                 post_rep = post_rep[keep]
-                batch_rep = batch_rep[keep]
                 time_rep = time_rep[keep]
 
+            # [핵심 수정] 저수지 샘플링 로직: 
+            # 무거운 _build_states_and_extras를 호출하기 '전'에 개수를 자른다.
+            num_events = pre_rep.numel()
+            if num_events > max_events_per_image:
+                # 랜덤 순열로 K개만 선택 (메모리 보호)
+                perm = torch.randperm(num_events, device=device)[:max_events_per_image]
+                pre_rep = pre_rep[perm]
+                post_rep = post_rep[perm]
+                time_rep = time_rep[perm]
+                # batch_rep은 어차피 스칼라 확장이므로 나중에 만듦
+
+            # 선택된 소수의 이벤트에 대해서만 상태 생성 (메모리 안전)
             if pre_rep.numel() > 0:
+                batch_rep = batch_tensor.expand(pre_rep.size(0))
                 batch_time = torch.stack((batch_rep, time_rep), dim=1)
+                
                 states, extras = _build_states_and_extras(
                     padded_pre,
                     padded_post,
                     window,
                     weight_snapshot,
                     l_norm=l_norm,
-                    event_type=_EVENT_TYPE_PRE,
+                    event_type=_EVENT_TYPE_PRE, # 정의된 상수 사용
                     batch_and_time=batch_time,
                     pre_idx=pre_rep,
                     post_idx=post_rep,
@@ -158,30 +172,40 @@ def gather_events(
                 )
                 _write_events(states, extras, pre_rep, post_rep, batch_rep)
 
+        # 2. Post-synaptic 이벤트 처리 (위와 동일한 로직 적용)
         post_mask = post_spikes[batch].to(torch.bool)
         post_idx_single, time_post = post_mask.nonzero(as_tuple=True)
+        
         if post_idx_single.numel() > 0:
             pre_rep = pre_all.repeat(post_idx_single.numel())
             post_rep = post_idx_single.repeat_interleave(n_pre)
-            batch_rep = batch_tensor.expand(pre_rep.size(0))
             time_rep = time_post.repeat_interleave(n_pre)
 
             if valid_mask is not None:
                 keep = valid_mask[pre_rep, post_rep]
                 pre_rep = pre_rep[keep]
                 post_rep = post_rep[keep]
-                batch_rep = batch_rep[keep]
                 time_rep = time_rep[keep]
 
+            # [핵심 수정] Post 이벤트에 대해서도 동일하게 샘플링 적용
+            num_events = pre_rep.numel()
+            if num_events > max_events_per_image:
+                perm = torch.randperm(num_events, device=device)[:max_events_per_image]
+                pre_rep = pre_rep[perm]
+                post_rep = post_rep[perm]
+                time_rep = time_rep[perm]
+
             if post_rep.numel() > 0:
+                batch_rep = batch_tensor.expand(pre_rep.size(0))
                 batch_time = torch.stack((batch_rep, time_rep), dim=1)
+                
                 states, extras = _build_states_and_extras(
                     padded_pre,
                     padded_post,
                     window,
                     weight_snapshot,
                     l_norm=l_norm,
-                    event_type=_EVENT_TYPE_POST,
+                    event_type=_EVENT_TYPE_POST, # 정의된 상수 사용
                     batch_and_time=batch_time,
                     pre_idx=pre_rep,
                     post_idx=post_rep,
