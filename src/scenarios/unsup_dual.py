@@ -295,6 +295,7 @@ def run_unsup2(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 0,
+                max_events_per_image=args.events_per_image,
                 padded_pre=_get_padded(input_spikes),
                 padded_post=_get_padded(exc_spikes),
             )
@@ -306,6 +307,7 @@ def run_unsup2(args, logger):
                 event_buffer,
                 1,
                 valid_mask=network.inh_exc_mask,
+                max_events_per_image=args.events_per_image,
                 padded_pre=_get_padded(inh_spikes),
                 padded_post=_get_padded(exc_spikes),
             )
