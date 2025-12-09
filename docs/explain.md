@@ -38,8 +38,8 @@
   - **Theory 연계**: 텍스트 기반 로그 저장 요구를 충족.
 
 ### utils/event_utils.py
-- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, buffer: EventBatchBuffer, connection_id: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None, max_pairs: int = 131072) -> None`
-  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 희소 인덱싱으로 수집해 `EventBatchBuffer.reserve`에서 받은 GPU 메모리 슬라이스에 직접 기록한다. `padded_pre/post`를 전달하면 동일 스파이크 텐서에 대한 패딩 커널을 재사용하며, extras에는 호출 시점 가중치 스냅샷(옵션 `l_norm`, 이벤트 타입 원핫)을 포함한다. `max_pairs`는 과거 블록 처리 API 호환을 위해 남겨둔 인자다.
+- `gather_events(pre_spikes: torch.Tensor, post_spikes: torch.Tensor, weights: torch.Tensor, window: int, buffer: EventBatchBuffer, connection_id: int, *, l_norm: float | None = None, valid_mask: torch.Tensor | None = None, padded_pre: torch.Tensor | None = None, padded_post: torch.Tensor | None = None, max_events_per_image: int = 1024) -> None`
+  - **역할**: `Theory.md` 2.7절의 pre/post 스파이크 히스토리를 희소 인덱싱으로 수집해 `EventBatchBuffer.reserve`에서 받은 GPU 메모리 슬라이스에 직접 기록한다. `padded_pre/post`를 전달하면 동일 스파이크 텐서에 대한 패딩 커널을 재사용하며, extras에는 호출 시점 가중치 스냅샷(옵션 `l_norm`, 이벤트 타입 원핫)을 포함한다. `max_events_per_image`는 CLI 인자 `--events-per-image`에서 전달되어 이미지당 이벤트 수를 저수지 샘플링으로 제한한다.
   - **출력**: 없음. 스파이크 히스토리는 `torch.bool`로 저장하고 Actor/Critic는 forward 직전에 `float()`로 변환해 CNN에 투입한다.
   - **Theory 연계/최적화**: triple-copy(리스트→`torch.cat`→`buffer.add`) 제거로 GPU 메모리 대역폭과 커널 런칭 오버헤드를 줄이며, 이미지별 이벤트 제한과 결합해 `Theory.md` 2.9.3의 미니배치 규칙을 유지한다. 패딩 캐시는 동일 스파이크 텐서 재사용 시 `F.pad` 중복 실행을 없애고, detach된 weight snapshot으로 Actor가 시뮬레이션 시점 파라미터를 그대로 관찰하도록 보장한다.
 

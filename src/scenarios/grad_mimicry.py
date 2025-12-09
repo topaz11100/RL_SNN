@@ -295,7 +295,7 @@ def run_grad(args, logger):
                     l_norm=layer_norms[li],
                     padded_pre=_get_padded(prev_spikes),
                     padded_post=_get_padded(hidden_spikes),
-                    max_event_per_events=
+                    max_events_per_image=args.events_per_image,
                 )
                 prev_spikes = hidden_spikes
 
@@ -307,6 +307,7 @@ def run_grad(args, logger):
                 event_buffer,
                 len(network.w_layers) - 1,
                 l_norm=layer_norms[-1],
+                max_events_per_image=args.events_per_image,
                 padded_pre=_get_padded(prev_spikes),
                 padded_post=_get_padded(output_spikes),
             )

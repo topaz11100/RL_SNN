@@ -250,6 +250,7 @@ def run_semi(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 0,
+                max_events_per_image=args.events_per_image,
                 padded_pre=_get_padded(input_spikes),
                 padded_post=_get_padded(hidden_spikes),
             )
@@ -260,6 +261,7 @@ def run_semi(args, logger):
                 args.spike_array_len,
                 event_buffer,
                 1,
+                max_events_per_image=args.events_per_image,
                 padded_pre=_get_padded(hidden_spikes),
                 padded_post=_get_padded(output_spikes),
             )
