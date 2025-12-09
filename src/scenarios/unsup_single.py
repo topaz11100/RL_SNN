@@ -229,8 +229,11 @@ def run_unsup1(args, logger):
         for batch_idx, (images, _, indices) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             indices = indices.to(device, non_blocking=True)
-            input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate)
-            exc_spikes, inh_spikes = network(input_spikes)
+
+            # 수정 후: SNN 실행 부분만 no_grad로 감쌉니다.
+            with torch.no_grad():
+                input_spikes = poisson_encode(images, args.T_unsup1, max_rate=args.max_rate)
+                exc_spikes, inh_spikes = network(input_spikes)
 
             r_sparse, firing_rates = _compute_sparse_reward(exc_spikes, args.rho_target)
 
@@ -293,10 +296,10 @@ def run_unsup1(args, logger):
             batch_size = winners.numel()
             sample_increment = winners.new_full((), batch_size, dtype=torch.float32)
             total_samples = total_samples + sample_increment
-            total_sparse = total_sparse + r_sparse.sum()
-            total_div = total_div + r_div.sum()
-            total_stab = total_stab + r_stab.sum()
-            total_reward_sum = total_reward_sum + total_reward.sum()
+            total_sparse = total_sparse + r_sparse.sum().detach()
+            total_div = total_div + r_div.sum().detach()
+            total_stab = total_stab + r_stab.sum().detach()
+            total_reward_sum = total_reward_sum + total_reward.sum().detach()
 
             rewards_tensor = total_reward.detach()
 

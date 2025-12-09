@@ -7,20 +7,20 @@ set -e
 
 # 공통 설정
 SEED=0
-NUM_EPOCHS=30
-BATCH_SIZE_IMAGES=16
-EVENTS_PER_IMAGE=4096
-EVENT_BATCH_SIZE=65536
-PPO_BATCH_SIZE=4096
+NUM_EPOCHS=15
+BATCH_SIZE_IMAGES=4
+EVENTS_PER_IMAGE=512
+EVENT_BATCH_SIZE=2048
+PPO_BATCH_SIZE=256
 
 PPO_EPS=0.2
 PPO_EPOCHS=2
 
-T_UNSUP1=100
-SPIKE_ARRAY_LEN=25
+T_UNSUP1=80
+SPIKE_ARRAY_LEN=20
 DT=1.0
 
-N_E=300
+N_E=250
 
 SIGMA_UNSUP1=0.1
 
@@ -79,7 +79,8 @@ for CLIP in "${CLIPS[@]}"; do
         --lr-actor "$LR_ACTOR" \
         --lr-critic "$LR_CRITIC" \
         --log-interval "$LOG_INTERVAL" \
-        --run-name "$RUN_NAME"
+        --run-name "$RUN_NAME" \
+        
 
     echo "[DONE] $RUN_NAME"
     echo "END : $(date "+%Y%m%d_%H%M%S")"

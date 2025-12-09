@@ -99,7 +99,7 @@ class EventBatchBuffer:
         needed = self.length + additional
         if needed <= self.capacity:
             return
-        new_capacity = max(needed, self.capacity * 2)
+        new_capacity = max(needed, int(self.capacity * 1.2))
 
         def _grow(storage: torch.Tensor, shape_tail: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
             new_tensor = torch.empty((new_capacity, *shape_tail), device=storage.device, dtype=dtype)
