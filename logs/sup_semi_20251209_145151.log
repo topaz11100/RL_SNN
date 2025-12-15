@@ -1,6 +1,0 @@
-nohup: ignoring input
-================================================================
- Launching semi/supervised scenarios (semi, grad_direct, grad_poisson) in parallel  (20251209_145151)
-================================================================
-Submitted semi, grad_direct, grad_poisson (3 jobs) with nohup.
-Check '../logs/semi_*.log' and '../logs/grad_*_20251209_145151.log' and 'nvidia-smi' for progress.

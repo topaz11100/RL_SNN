@@ -1,2 +1,0 @@
-epoch	acc	reward	align	active_ratio
-1	0.097667	-0.000002	-0.000002	0.015635
